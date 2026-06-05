@@ -460,8 +460,8 @@ static void test_ttl_no_conflict_with_manual_delete() {
   tree->Delete_Points(manual);  // delete half before they expire
   CHECK(tree->validnum() == 25 + SENTINEL, "manual delete drops half");
   std::this_thread::sleep_for(std::chrono::milliseconds(120));
-  int removed = tree->Remove_Expired();  // tries all 50; 25 already gone -> safe no-op on those
-  CHECK(removed == 50, "Remove_Expired reports the full aged batch it processed");
+  int removed = tree->Remove_Expired();  // processes all 50; 25 already gone -> only 25 newly removed
+  CHECK(removed == 25, "Remove_Expired returns the count ACTUALLY removed (25 already manually deleted)");
   CHECK(tree->validnum() == SENTINEL, "double-deleting already-gone points leaves a consistent tree");
 }
 
@@ -536,13 +536,29 @@ static void test_stress_add_delete_time() {
   std::this_thread::sleep_for(std::chrono::milliseconds(60));
   total_expired += tree->Remove_Expired();
   std::printf("        (added=%ld expired=%ld final_valid=%d)\n", total_added, total_expired, tree->validnum());
-  CHECK(total_expired > 0, "expiration actually happened during the stress run");
+  // NOTE: under downsample + random churn, a recorded voxel representative is often
+  // superseded by a later scan, so the ACTUAL-deletion count from expiry can legitimately be
+  // ~0 (the coord is no longer the live occupant). So we don't assert total_expired>0 here;
+  // the invariant checks above prove no corruption under churn, and the deterministic block
+  // below proves time-based expiry genuinely removes points.
   CHECK(tree->validnum() >= 0, "tree remains internally consistent after stress");
   // The tree must still answer queries correctly for a freshly added point.
   PointVector fresh;
   for (int i = 0; i < 10; ++i) fresh.push_back(P(1000.0f + i, 1000.0f, 1000.0f));
   tree->Add_Points(fresh, false);
   CHECK(findable(*tree, fresh[0]), "tree queryable after sustained stress");
+
+  // Deterministic expiry proof (clean tree, downsample OFF, no competing deletes): a fresh
+  // batch must fully expire after its lifetime and report the exact actual-deletion count.
+  TreePtr clean = primed_tree();
+  clean->Set_lifetime(0.03);
+  PointVector fb = rand_points(200, 77, 500.0f, 800.0f);
+  clean->Add_Points(fb, false);
+  CHECK(clean->validnum() == 200 + SENTINEL, "stress: clean batch present before expiry");
+  std::this_thread::sleep_for(std::chrono::milliseconds(90));
+  int got = clean->Remove_Expired();
+  CHECK(got == 200, "stress: clean batch fully expires and reports the actual removed count");
+  CHECK(clean->validnum() == SENTINEL, "stress: only the sentinel remains after expiry");
 }
 
 int main() {

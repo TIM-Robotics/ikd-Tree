@@ -353,6 +353,10 @@ void KD_TREE<PointType>::run_operation(KD_TREE_NODE **root, Operation_Logger_Typ
 
 template <typename PointType>
 void KD_TREE<PointType>::Build(PointVector point_cloud) {
+  // Build replaces the whole tree, so purge the TTL time index too -- otherwise stale
+  // ScanGroups from the previous tree could expire freshly-built points sharing coordinates
+  // (and would linger in memory). lifetime_/throttle are user config and are left intact.
+  ttl_groups_.clear();
   if (Root_Node != nullptr) {
     delete_tree_nodes(&Root_Node);
   }
@@ -419,6 +423,10 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
   bool downsample_switch = downsample_on && DOWNSAMPLE_SWITCH;
   float min_dist, tmp_dist;
   int tmp_counter = 0;
+  // For TTL: record the points actually inserted into the tree this batch (the downsample
+  // representative, not the raw input), so expiry tracks what truly lives in the tree.
+  const bool record_ttl = (lifetime_ != std::numeric_limits<double>::infinity());
+  PointVector ttl_recorded;
   for (int i = 0; i < PointToAdd.size(); i++) {
     if (downsample_switch) {
       Box_of_Point.vertex_min[0] = floor(PointToAdd[i].x / downsample_size) * downsample_size;
@@ -445,6 +453,7 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
         if (Downsample_Storage.size() > 1 || same_point(PointToAdd[i], downsample_result)) {
           if (Downsample_Storage.size() > 0) Delete_by_range(&Root_Node, Box_of_Point, true, true);
           Add_by_point(&Root_Node, downsample_result, true, Root_Node->division_axis);
+          if (record_ttl) ttl_recorded.push_back(downsample_result);
           tmp_counter++;
         }
       } else {
@@ -457,6 +466,7 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
           pthread_mutex_lock(&working_flag_mutex);
           if (Downsample_Storage.size() > 0) Delete_by_range(&Root_Node, Box_of_Point, false, true);
           Add_by_point(&Root_Node, downsample_result, false, Root_Node->division_axis);
+          if (record_ttl) ttl_recorded.push_back(downsample_result);
           tmp_counter++;
           if (rebuild_flag) {
             pthread_mutex_lock(&rebuild_logger_mutex_lock);
@@ -470,12 +480,14 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
     } else {
       if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node) {
         Add_by_point(&Root_Node, PointToAdd[i], true, Root_Node->division_axis);
+        if (record_ttl) ttl_recorded.push_back(PointToAdd[i]);
       } else {
         Operation_Logger_Type operation;
         operation.point = PointToAdd[i];
         operation.op = ADD_POINT;
         pthread_mutex_lock(&working_flag_mutex);
         Add_by_point(&Root_Node, PointToAdd[i], false, Root_Node->division_axis);
+        if (record_ttl) ttl_recorded.push_back(PointToAdd[i]);
         if (rebuild_flag) {
           pthread_mutex_lock(&rebuild_logger_mutex_lock);
           Rebuild_Logger.push(operation);
@@ -487,8 +499,8 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
   }
   // Record this batch's insertion time for TTL expiry. No-op (and zero overhead) unless a
   // finite lifetime has been set, so existing callers are unaffected.
-  if (lifetime_ != std::numeric_limits<double>::infinity() && !PointToAdd.empty()) {
-    ttl_groups_.push_back(ScanGroup{steady_now(), PointToAdd});
+  if (record_ttl && !ttl_recorded.empty()) {
+    ttl_groups_.push_back(ScanGroup{steady_now(), std::move(ttl_recorded)});
   }
   return tmp_counter;
 }
@@ -505,21 +517,31 @@ int KD_TREE<PointType>::Remove_Expired() {
   PointVector to_delete;
   while (!ttl_groups_.empty() && (now - ttl_groups_.front().stamp) > lifetime_) {
     ScanGroup &g = ttl_groups_.front();
-    // Honor the per-call delete cap: stop pulling whole groups once we'd exceed it, but
-    // always make progress on at least one group to avoid stalling.
-    if (ttl_max_delete_per_call_ > 0 && !to_delete.empty() &&
-        int(to_delete.size() + g.points.size()) > ttl_max_delete_per_call_) {
-      break;
+    if (ttl_max_delete_per_call_ > 0) {
+      int allowed = ttl_max_delete_per_call_ - int(to_delete.size());
+      if (allowed <= 0) break;  // per-call cap reached
+      if (int(g.points.size()) > allowed) {
+        // The oldest group alone exceeds the remaining budget: consume only `allowed`
+        // points and keep the rest in the group for the next call, so the cap is a true
+        // hard limit even for a single huge batch. `allowed > 0` guarantees progress.
+        to_delete.insert(to_delete.end(), g.points.begin(), g.points.begin() + allowed);
+        g.points.erase(g.points.begin(), g.points.begin() + allowed);
+        break;
+      }
     }
     to_delete.insert(to_delete.end(), g.points.begin(), g.points.end());
     ttl_groups_.pop_front();
   }
-  if (!to_delete.empty()) {
-    // Reuse the existing single-writer delete path; deleting an already-gone point (e.g.
-    // dropped earlier by downsample) is a safe no-op.
-    Delete_Points(to_delete);
-  }
-  return int(to_delete.size());
+  if (to_delete.empty()) return 0;
+  // Count points ACTUALLY removed via the validnum delta (without changing Delete_Points'
+  // signature). validnum is invariant under the background rebuild, so the delta reflects
+  // only this call's deletions; points already gone (manual delete / downsample drop) don't
+  // change validnum, so they aren't over-counted. Reuse the proven single-writer delete path.
+  int before = validnum();
+  Delete_Points(to_delete);
+  int after = validnum();
+  if (before < 0 || after < 0) return int(to_delete.size());  // validnum unavailable mid-rebuild
+  return before - after;
 }
 
 template <typename PointType>
