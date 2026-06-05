@@ -8,12 +8,10 @@ on:
 jobs:
   build-and-test:
     name: build & test (${{ matrix.sanitizer }})
-    runs-on: ubuntu-latest
-    container:
-      # Non-privileged: TSan ASLR is handled by `setarch -R` in the CTest command, so no
-      # elevated container privileges are needed. The sysctl step below is best-effort and
-      # degrades gracefully when not permitted.
-      image: ubuntu:24.04
+    # Run directly on the host runner (Ubuntu 24.04 -> PCL 1.14), NOT in a container, so the
+    # ThreadSanitizer ASLR workaround (sysctl / setarch -R) works without privileged
+    # containers. The source is ROS-independent; only PCL + Eigen are needed.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -27,17 +25,18 @@ jobs:
 
       - name: Install dependencies (PCL + Eigen, no ROS)
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build \
             libpcl-dev libeigen3-dev \
-            util-linux ca-certificates
+            util-linux
 
       - name: Reduce ASLR entropy for ThreadSanitizer
         if: matrix.sanitizer == 'tsan'
         run: |
-          # Newer kernels use 32-bit mmap randomization which TSan can't map around.
-          sysctl -w vm.mmap_rnd_bits=28 || echo "sysctl not permitted; relying on setarch -R"
+          # Newer kernels use 32-bit mmap randomization that TSan can't map around.
+          # On the host runner sudo can write this; setarch -R in CTest is the fallback.
+          sudo sysctl -w vm.mmap_rnd_bits=28 || echo "sysctl not permitted; relying on setarch -R"
 
       - name: Configure
         run: |
@@ -57,5 +56,5 @@ jobs:
           TSAN_OPTIONS: halt_on_error=0
         # Sanitizer runtimes are statically linked (-static-lib*san in CMake), so no
         # LD_PRELOAD ordering workaround is needed. TSan ASLR is handled by `setarch -R`
-        # in the CTest command.
+        # in the CTest command (CMakeLists.txt).
         run: ctest --output-on-failure --no-tests=error
