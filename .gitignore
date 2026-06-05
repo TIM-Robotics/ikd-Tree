@@ -1,0 +1,14 @@
+# Build output
+build/
+cmake-build-*/
+*.o
+*.a
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local agent/tooling artifacts (not part of the project)
+.omc/
+.claude/

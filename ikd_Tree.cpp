@@ -25,7 +25,16 @@ template <typename PointType>
 KD_TREE<PointType>::~KD_TREE() {
   stop_thread();
   Delete_Storage_Disabled = true;
-  delete_tree_nodes(&Root_Node);
+  // Build() allocates STATIC_ROOT_NODE and hangs the real tree off its left_son_ptr (with
+  // Root_Node == STATIC_ROOT_NODE->left_son_ptr). Free via that owner so the sentinel node
+  // is reclaimed too; otherwise it (and anything still under it) leaks. When Build() was
+  // never called STATIC_ROOT_NODE stays null and Root_Node owns the tree directly.
+  if (STATIC_ROOT_NODE != nullptr) {
+    delete_tree_nodes(&STATIC_ROOT_NODE);
+    Root_Node = nullptr;
+  } else {
+    delete_tree_nodes(&Root_Node);
+  }
   PointVector().swap(PCL_Storage);
   Rebuild_Logger.clear();
 }
@@ -476,7 +485,41 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
       }
     }
   }
+  // Record this batch's insertion time for TTL expiry. No-op (and zero overhead) unless a
+  // finite lifetime has been set, so existing callers are unaffected.
+  if (lifetime_ != std::numeric_limits<double>::infinity() && !PointToAdd.empty()) {
+    ttl_groups_.push_back(ScanGroup{steady_now(), PointToAdd});
+  }
   return tmp_counter;
+}
+
+template <typename PointType>
+double KD_TREE<PointType>::steady_now() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+template <typename PointType>
+int KD_TREE<PointType>::Remove_Expired() {
+  if (lifetime_ == std::numeric_limits<double>::infinity()) return 0;
+  double now = steady_now();
+  PointVector to_delete;
+  while (!ttl_groups_.empty() && (now - ttl_groups_.front().stamp) > lifetime_) {
+    ScanGroup &g = ttl_groups_.front();
+    // Honor the per-call delete cap: stop pulling whole groups once we'd exceed it, but
+    // always make progress on at least one group to avoid stalling.
+    if (ttl_max_delete_per_call_ > 0 && !to_delete.empty() &&
+        int(to_delete.size() + g.points.size()) > ttl_max_delete_per_call_) {
+      break;
+    }
+    to_delete.insert(to_delete.end(), g.points.begin(), g.points.end());
+    ttl_groups_.pop_front();
+  }
+  if (!to_delete.empty()) {
+    // Reuse the existing single-writer delete path; deleting an already-gone point (e.g.
+    // dropped earlier by downsample) is a safe no-op.
+    Delete_Points(to_delete);
+  }
+  return int(to_delete.size());
 }
 
 template <typename PointType>

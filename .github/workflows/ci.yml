@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build & test (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+      # NET_ADMIN/privileged not guaranteed; TSan ASLR is handled via `setarch -R`
+      # in CTest, with a best-effort sysctl below as a belt-and-suspenders.
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [none, asan-ubsan, tsan]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (PCL + Eigen, no ROS)
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            libpcl-dev libeigen3-dev \
+            util-linux ca-certificates
+
+      - name: Reduce ASLR entropy for ThreadSanitizer
+        if: matrix.sanitizer == 'tsan'
+        run: |
+          # Newer kernels use 32-bit mmap randomization which TSan can't map around.
+          sysctl -w vm.mmap_rnd_bits=28 || echo "sysctl not permitted; relying on setarch -R"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DIKD_TREE_BUILD_TESTS=ON \
+            -DIKD_TREE_SANITIZER=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Run tests
+        working-directory: build
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=0
+        # Sanitizer runtimes are statically linked (-static-lib*san in CMake), so no
+        # LD_PRELOAD ordering workaround is needed. TSan ASLR is handled by `setarch -R`
+        # in the CTest command.
+        run: ctest --output-on-failure --no-tests=error

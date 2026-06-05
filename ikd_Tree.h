@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
+#include <limits>
 #include <queue>
 
 #define EPSS 1e-6
@@ -261,9 +263,38 @@ class KD_TREE {
   void flatten(KD_TREE_NODE *root, PointVector &Storage, delete_point_storage_set storage_type);
   virtual void acquire_removed_points(PointVector &removed_points);
   BoxPointType tree_range();
+
+  // ---- Point lifetime (TTL) ----
+  // Points are auto-stamped with a steady_clock time when added (only while a finite
+  // lifetime is set). Remove_Expired() deletes points older than the lifetime through the
+  // existing Delete_Points path. Disabled by default (lifetime = +inf) so existing callers
+  // see no behavior change.
+  void Set_lifetime(double lifetime_seconds) { lifetime_ = lifetime_seconds; }
+  double Get_lifetime() const { return lifetime_; }
+  // Cap how many points one Remove_Expired() call may delete (0 = unlimited). Throttling
+  // avoids rebuild storms and Rebuild_Logger overflow on mass expiration.
+  void Set_max_expire_per_call(int n) { ttl_max_delete_per_call_ = n; }
+  // Deletes all points whose age exceeds the lifetime. Returns the number deleted.
+  // Expired points are routed into Points_deleted (use acquire_removed_points to drain).
+  int Remove_Expired();
   PointVector PCL_Storage;
   KD_TREE_NODE *Root_Node = nullptr;
   int max_queue_size = 0;
+
+ private:
+  // ---- Point lifetime (TTL) state ----
+  // Time index lives OUTSIDE the core tree (nodes/PointType untouched) so it survives the
+  // rebuild thread for free. Only ever touched from the caller thread (Add_Points /
+  // Remove_Expired / setters), mirroring the tree's single-external-writer contract, so no
+  // extra mutex is needed.
+  struct ScanGroup {
+    double stamp;
+    PointVector points;
+  };
+  double lifetime_ = std::numeric_limits<double>::infinity();  // +inf => TTL disabled
+  int ttl_max_delete_per_call_ = 0;                            // 0 => unlimited
+  std::deque<ScanGroup> ttl_groups_;
+  static double steady_now();
 };
 
 }  // namespace ikdtree
