@@ -10,8 +10,6 @@ project(ikd_Tree CXX)
 # ----------------------------------------------------------------------------
 
 option(IKD_TREE_BUILD_TESTS "Build ikd-Tree unit/stress tests" OFF)
-option(IKD_TREE_USE_SHIM_POINTTYPES
-       "Use bundled minimal point-type shims instead of PCL (no PCL/Eigen needed)" OFF)
 set(IKD_TREE_SANITIZER "none" CACHE STRING "Sanitizer: none | asan-ubsan | tsan")
 set_property(CACHE IKD_TREE_SANITIZER PROPERTY STRINGS none asan-ubsan tsan)
 
@@ -28,19 +26,15 @@ target_include_directories(ikd-Tree PUBLIC
 find_package(Threads REQUIRED)
 target_link_libraries(ikd-Tree PUBLIC Threads::Threads)
 
-if(IKD_TREE_USE_SHIM_POINTTYPES)
-  message(STATUS "ikd-Tree: using bundled point-type shims (no PCL/Eigen)")
-  target_include_directories(ikd-Tree PUBLIC
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/test/shims>)
-else()
-  find_package(PCL REQUIRED COMPONENTS common)
-  target_include_directories(ikd-Tree PUBLIC ${PCL_INCLUDE_DIRS})
-  target_link_libraries(ikd-Tree PUBLIC ${PCL_LIBRARIES})
-  # Eigen headers normally come transitively with PCL; link the imported target if present.
-  find_package(Eigen3 QUIET)
-  if(TARGET Eigen3::Eigen)
-    target_link_libraries(ikd-Tree PUBLIC Eigen3::Eigen)
-  endif()
+# ikd-Tree depends on PCL (point_types.h) + Eigen (aligned_allocator). Both are always
+# required; tests build against the real PCL headers (CI installs libpcl-dev/libeigen3-dev).
+find_package(PCL REQUIRED COMPONENTS common)
+target_include_directories(ikd-Tree PUBLIC ${PCL_INCLUDE_DIRS})
+target_link_libraries(ikd-Tree PUBLIC ${PCL_LIBRARIES})
+# Eigen headers normally come transitively with PCL; link the imported target if present.
+find_package(Eigen3 QUIET)
+if(TARGET Eigen3::Eigen)
+  target_link_libraries(ikd-Tree PUBLIC Eigen3::Eigen)
 endif()
 
 # ---- sanitizer helper (applied to the library AND the test binary) ----
