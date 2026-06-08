@@ -61,8 +61,8 @@ static float dist2(const PointType &a, const PointType &b) {
 
 // Half-open, matching ikd-Tree's Box_Search / Delete_by_range semantics.
 static bool in_box(const PointType &p, const BoxPointType &b) {
-  return p.x >= b.vertex_min[0] && p.x < b.vertex_max[0] && p.y >= b.vertex_min[1] &&
-         p.y < b.vertex_max[1] && p.z >= b.vertex_min[2] && p.z < b.vertex_max[2];
+  return p.x >= b.vertex_min[0] && p.x < b.vertex_max[0] && p.y >= b.vertex_min[1] && p.y < b.vertex_max[1] &&
+         p.z >= b.vertex_min[2] && p.z < b.vertex_max[2];
 }
 
 // n random, effectively-distinct points in [lo, hi]^3.
@@ -122,7 +122,7 @@ static void test_add_points_downsample() {
   TreePtr tree = new_tree(0.3f, 0.6f, 1.0f);  // 1m voxel
   tree->Build(rand_points(10, 4, 0.0f, 500.0f));
   int before_valid = tree->validnum();  // size() counts lazily-deleted nodes; validnum() is the live count
-  PointVector cluster;  // many points inside a single 1m voxel near (1000,1000,1000)
+  PointVector cluster;                  // many points inside a single 1m voxel near (1000,1000,1000)
   std::mt19937 rng(5);
   std::uniform_real_distribution<float> j(0.0f, 0.9f);
   for (int i = 0; i < 50; ++i) cluster.push_back(P(1000.0f + j(rng), 1000.0f + j(rng), 1000.0f + j(rng)));
@@ -176,9 +176,12 @@ static void test_box_search() {
   PointVector pts = rand_points(400, 8);
   tree->Build(pts);
   BoxPointType box;
-  box.vertex_min[0] = 20.0f; box.vertex_max[0] = 60.0f;
-  box.vertex_min[1] = 20.0f; box.vertex_max[1] = 60.0f;
-  box.vertex_min[2] = 20.0f; box.vertex_max[2] = 60.0f;
+  box.vertex_min[0] = 20.0f;
+  box.vertex_max[0] = 60.0f;
+  box.vertex_min[1] = 20.0f;
+  box.vertex_max[1] = 60.0f;
+  box.vertex_min[2] = 20.0f;
+  box.vertex_max[2] = 60.0f;
   PointVector found;
   tree->Box_Search(box, found);
   int brute = 0;
@@ -241,9 +244,12 @@ static void test_delete_box_and_readd() {
   PointVector pts = rand_points(400, 12);
   tree->Build(pts);
   BoxPointType box;
-  box.vertex_min[0] = 10.0f; box.vertex_max[0] = 40.0f;
-  box.vertex_min[1] = 10.0f; box.vertex_max[1] = 40.0f;
-  box.vertex_min[2] = 10.0f; box.vertex_max[2] = 40.0f;
+  box.vertex_min[0] = 10.0f;
+  box.vertex_max[0] = 40.0f;
+  box.vertex_min[1] = 10.0f;
+  box.vertex_max[1] = 40.0f;
+  box.vertex_min[2] = 10.0f;
+  box.vertex_max[2] = 40.0f;
   std::vector<BoxPointType> boxes{box};
   int valid_before = tree->validnum();
   int removed = tree->Delete_Point_Boxes(boxes);
@@ -291,7 +297,12 @@ static void test_other_point_types() {
     std::mt19937 rng(15);
     std::uniform_real_distribution<float> u(0, 100);
     for (int i = 0; i < 200; ++i) {
-      pcl::PointXYZI p; p.x = u(rng); p.y = u(rng); p.z = u(rng); p.intensity = i; v.push_back(p);
+      pcl::PointXYZI p;
+      p.x = u(rng);
+      p.y = u(rng);
+      p.z = u(rng);
+      p.intensity = i;
+      v.push_back(p);
     }
     t->Build(v);
     CHECK(t->size() == 200, "PointXYZI build size");
@@ -305,7 +316,12 @@ static void test_other_point_types() {
     std::mt19937 rng(16);
     std::uniform_real_distribution<float> u(0, 100);
     for (int i = 0; i < 200; ++i) {
-      pcl::PointXYZINormal p; p.x = u(rng); p.y = u(rng); p.z = u(rng); p.curvature = i; v.push_back(p);
+      pcl::PointXYZINormal p;
+      p.x = u(rng);
+      p.y = u(rng);
+      p.z = u(rng);
+      p.curvature = i;
+      v.push_back(p);
     }
     t->Build(v);
     CHECK(t->size() == 200, "PointXYZINormal build size");
@@ -320,9 +336,12 @@ static void test_tree_range() {
   BoxPointType r = tree->tree_range();
   float minx = 1e9f, miny = 1e9f, minz = 1e9f, maxx = -1e9f, maxy = -1e9f, maxz = -1e9f;
   for (auto &p : pts) {
-    minx = std::min(minx, p.x); maxx = std::max(maxx, p.x);
-    miny = std::min(miny, p.y); maxy = std::max(maxy, p.y);
-    minz = std::min(minz, p.z); maxz = std::max(maxz, p.z);
+    minx = std::min(minx, p.x);
+    maxx = std::max(maxx, p.x);
+    miny = std::min(miny, p.y);
+    maxy = std::max(maxy, p.y);
+    minz = std::min(minz, p.z);
+    maxz = std::max(maxz, p.z);
   }
   CHECK(r.vertex_min[0] <= minx + 1e-3f && r.vertex_max[0] >= maxx - 1e-3f, "tree_range x bounds enclose points");
   CHECK(r.vertex_min[1] <= miny + 1e-3f && r.vertex_max[1] >= maxy - 1e-3f, "tree_range y bounds enclose points");
@@ -484,9 +503,12 @@ static void test_concurrency_stress_with_ttl() {
     tree->Nearest_Search(P(u(rng), u(rng), u(rng)), 8, nn, nd);  // search vs rebuild thread
     PointVector boxres;
     BoxPointType b;
-    b.vertex_min[0] = 0; b.vertex_max[0] = 50;
-    b.vertex_min[1] = 0; b.vertex_max[1] = 50;
-    b.vertex_min[2] = 0; b.vertex_max[2] = 50;
+    b.vertex_min[0] = 0;
+    b.vertex_max[0] = 50;
+    b.vertex_min[1] = 0;
+    b.vertex_max[1] = 50;
+    b.vertex_min[2] = 0;
+    b.vertex_max[2] = 50;
     tree->Box_Search(b, boxres);
 
     if (iter % 3 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
