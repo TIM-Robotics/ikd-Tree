@@ -16,13 +16,13 @@
 //    sentinel via Build() so the real, TTL-stamped points can be added afterwards.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <random>
 #include <thread>
-#include <chrono>
 #include <vector>
 
 #include "ikd_Tree.h"
