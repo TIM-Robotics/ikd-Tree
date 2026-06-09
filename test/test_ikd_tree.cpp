@@ -484,6 +484,26 @@ static void test_ttl_no_conflict_with_manual_delete() {
   CHECK(tree->validnum() == SENTINEL, "double-deleting already-gone points leaves a consistent tree");
 }
 
+static void test_ttl_build_clears_stale_index() {
+  SECTION("TTL: Build clears stale TTL groups so rebuilt points are not expired");
+  TreePtr tree = primed_tree();
+  tree->Set_lifetime(0.05);
+
+  PointVector batch = rand_points(40, 27, 10.0f, 20.0f);
+  tree->Add_Points(batch, false);
+
+  PointVector rebuilt = batch;  // same coordinates on purpose: stale TTL would hit these
+  tree->Build(rebuilt);
+  CHECK(tree->validnum() == 40, "Build replaces the tree with the rebuilt batch");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  int removed = tree->Remove_Expired();
+
+  CHECK(removed == 0, "stale TTL groups from pre-Build points must not expire rebuilt points");
+  CHECK(tree->validnum() == 40, "rebuilt points remain after expiry pass");
+  for (int i = 0; i < 5; ++i) CHECK(findable(*tree, rebuilt[i]), "rebuilt point still searchable");
+}
+
 // ----------------------------- concurrency stress (sanitizers) -----------------------------
 
 static void test_concurrency_stress_with_ttl() {
@@ -611,6 +631,7 @@ int main() {
   test_ttl_mixed_ages();
   test_ttl_throttle();
   test_ttl_no_conflict_with_manual_delete();
+  test_ttl_build_clears_stale_index();
 
   // Concurrency / sanitizer stress
   test_concurrency_stress_with_ttl();
