@@ -487,16 +487,16 @@ static void test_ttl_no_conflict_with_manual_delete() {
 static void test_ttl_build_clears_stale_index() {
   SECTION("TTL: Build clears stale TTL groups so rebuilt points are not expired");
   TreePtr tree = primed_tree();
-  tree->Set_lifetime(0.05);
+  tree->Set_lifetime(1.0);
 
   PointVector batch = rand_points(40, 27, 10.0f, 20.0f);
   tree->Add_Points(batch, false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // age only the pre-Build TTL batch
 
   PointVector rebuilt = batch;  // same coordinates on purpose: stale TTL would hit these
   tree->Build(rebuilt);
   CHECK(tree->validnum() == 40, "Build replaces the tree with the rebuilt batch");
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(120));
   int removed = tree->Remove_Expired();
 
   CHECK(removed == 0, "stale TTL groups from pre-Build points must not expire rebuilt points");
@@ -519,6 +519,28 @@ static void test_ttl_build_first_scan_expires() {
   CHECK(removed == 40, "Build-inserted first scan is tracked by TTL and fully expires");
   CHECK(tree->validnum() == 0, "all Build-inserted points are gone after expiry");
   for (int i = 0; i < 5; ++i) CHECK(!findable(*tree, batch[i]), "expired Build point is no longer searchable");
+}
+
+static void test_ttl_expiry_drains_removed_points() {
+  SECTION("TTL: expired points eventually drain through acquire_removed_points");
+  TreePtr tree = new_tree(0.2f, 0.6f, 0.2f);  // low delete criterion -> rebuild/flatten records evicted points
+  tree->Set_lifetime(0.03);
+
+  PointVector batch = rand_points(2000, 80, 100.0f, 400.0f);
+  tree->Build(batch);
+  CHECK(tree->validnum() == 2000, "Build inserts the TTL-tracked batch before expiry");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(90));
+  int removed = tree->Remove_Expired();
+  CHECK(removed == 2000, "TTL expires the whole tracked batch");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  PointVector drained;
+  tree->acquire_removed_points(drained);
+
+  CHECK(tree->validnum() == 0, "expired batch is fully gone from the tree");
+  CHECK(drained.size() > 0, "acquire_removed_points eventually drains TTL-expired points");
+  CHECK(drained.size() <= 2000, "drain never returns more points than the expired batch");
 }
 
 static void test_ttl_downsample_records_live_representative() {
@@ -689,6 +711,7 @@ int main() {
   test_ttl_no_conflict_with_manual_delete();
   test_ttl_build_clears_stale_index();
   test_ttl_build_first_scan_expires();
+  test_ttl_expiry_drains_removed_points();
   test_ttl_downsample_records_live_representative();
   test_build_empty_releases_static_root_owner_cleanly();
 
