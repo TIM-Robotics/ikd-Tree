@@ -462,7 +462,7 @@ static void test_ttl_throttle() {
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(120));
   int first = tree->Remove_Expired();
-  CHECK(first > 0 && first <= 40, "throttled call deletes whole groups up to the cap");
+  CHECK(first > 0 && first <= 25, "throttled call deletes whole groups up to the cap");
   int total = first;
   for (int i = 0; i < 5; ++i) total += tree->Remove_Expired();
   CHECK(total == 60, "repeated calls eventually expire everything");
