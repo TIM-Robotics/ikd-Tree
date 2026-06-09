@@ -319,7 +319,7 @@ class KD_TREE {
     uint64_t generation;
   };
 
-  using TTLRecordVector = std::vector<TTLRecord>;
+  using TTLRecordVector = std::vector<TTLRecord, Eigen::aligned_allocator<TTLRecord>>;
 
   struct ScanGroup {
     double stamp;

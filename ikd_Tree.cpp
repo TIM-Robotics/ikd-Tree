@@ -549,7 +549,7 @@ int KD_TREE<PointType>::Remove_Expired() {
   if (lifetime_ == std::numeric_limits<double>::infinity()) return 0;
   double now = steady_now();
   PointVector to_delete;
-  std::vector<TTLRecord> latest_records_to_expire;
+  TTLRecordVector latest_records_to_expire;
   while (!ttl_groups_.empty() && (now - ttl_groups_.front().stamp) > lifetime_) {
     ScanGroup &g = ttl_groups_.front();
     const int remaining = int(g.records.size() - g.consumed);
