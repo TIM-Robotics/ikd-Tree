@@ -517,19 +517,22 @@ int KD_TREE<PointType>::Remove_Expired() {
   PointVector to_delete;
   while (!ttl_groups_.empty() && (now - ttl_groups_.front().stamp) > lifetime_) {
     ScanGroup &g = ttl_groups_.front();
+    const int remaining = int(g.points.size() - g.consumed);
     if (ttl_max_delete_per_call_ > 0) {
       int allowed = ttl_max_delete_per_call_ - int(to_delete.size());
       if (allowed <= 0) break;  // per-call cap reached
-      if (int(g.points.size()) > allowed) {
+      if (remaining > allowed) {
         // The oldest group alone exceeds the remaining budget: consume only `allowed`
         // points and keep the rest in the group for the next call, so the cap is a true
-        // hard limit even for a single huge batch. `allowed > 0` guarantees progress.
-        to_delete.insert(to_delete.end(), g.points.begin(), g.points.begin() + allowed);
-        g.points.erase(g.points.begin(), g.points.begin() + allowed);
+        // hard limit even for a single huge batch. Track a consumed offset to avoid
+        // shifting the remaining vector contents on every throttled call.
+        const auto begin = g.points.begin() + g.consumed;
+        to_delete.insert(to_delete.end(), begin, begin + allowed);
+        g.consumed += allowed;
         break;
       }
     }
-    to_delete.insert(to_delete.end(), g.points.begin(), g.points.end());
+    to_delete.insert(to_delete.end(), g.points.begin() + g.consumed, g.points.end());
     ttl_groups_.pop_front();
   }
   if (to_delete.empty()) return 0;

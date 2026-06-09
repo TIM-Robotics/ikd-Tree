@@ -294,6 +294,7 @@ class KD_TREE {
   struct ScanGroup {
     double stamp;
     PointVector points;
+    size_t consumed = 0;
   };
   double lifetime_ = std::numeric_limits<double>::infinity();  // +inf => TTL disabled
   int ttl_max_delete_per_call_ = 0;                            // 0 => unlimited
