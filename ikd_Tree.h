@@ -270,7 +270,10 @@ class KD_TREE {
   // lifetime is set). Remove_Expired() deletes points older than the lifetime through the
   // existing Delete_Points path. Disabled by default (lifetime = +inf) so existing callers
   // see no behavior change.
-  void Set_lifetime(double lifetime_seconds) { lifetime_ = lifetime_seconds; }
+  void Set_lifetime(double lifetime_seconds) {
+    if (lifetime_seconds <= 0.0) return;  // or throw, or clamp to +inf
+    lifetime_ = lifetime_seconds;
+  }
   double Get_lifetime() const { return lifetime_; }
   // Cap how many points one Remove_Expired() call may delete (0 = unlimited). Throttling
   // avoids rebuild storms and Rebuild_Logger overflow on mass expiration.
