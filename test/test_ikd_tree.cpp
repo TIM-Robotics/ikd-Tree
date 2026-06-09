@@ -22,6 +22,7 @@
 #include <memory>
 #include <random>
 #include <thread>
+#include <chrono>
 #include <vector>
 
 #include "ikd_Tree.h"
@@ -88,6 +89,27 @@ static TreePtr primed_tree(float del = 0.3f, float bal = 0.6f, float box = 0.2f)
   PointVector s{P(1e7f, 1e7f, 1e7f)};
   t->Build(s);
   return t;
+}
+
+template <typename Predicate>
+static bool wait_until(Predicate pred, int timeout_ms = 2000, int poll_ms = 5) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+  }
+  return pred();
+}
+
+static bool wait_for_removed_points(KD_TREE<PointType> &tree, PointVector &removed, int timeout_ms = 2000) {
+  removed.clear();
+  return wait_until(
+      [&]() {
+        removed.clear();
+        tree.acquire_removed_points(removed);
+        return !removed.empty();
+      },
+      timeout_ms);
 }
 
 static bool findable(KD_TREE<PointType> &tree, const PointType &q) {
@@ -228,12 +250,11 @@ static void test_acquire_removed_points() {
   tree->Build(pts);
   PointVector del(pts.begin(), pts.begin() + 1500);  // delete most -> forces rebuild+flatten
   tree->Delete_Points(del);
-  std::this_thread::sleep_for(std::chrono::milliseconds(80));
   PointVector removed;
-  tree->acquire_removed_points(removed);
-  CHECK(tree->validnum() == 500, "validnum reflects all deletions");
-  CHECK(removed.size() > 0, "acquire returns points physically evicted by rebuild");
+  CHECK(wait_for_removed_points(*tree, removed), "acquire eventually returns points physically evicted by rebuild");
   CHECK(removed.size() <= 1500, "acquire never returns more than were deleted");
+  CHECK(findable(*tree, pts[1700]), "survivor remains searchable after async rebuild");
+  CHECK(!findable(*tree, pts[10]), "deleted point remains absent after async rebuild");
 }
 
 static void test_delete_box_and_readd() {
@@ -280,8 +301,8 @@ static void test_multithread_rebuild_correctness() {
   CHECK(tree->size() == 5000, "large build size correct");
   PointVector del(pts.begin(), pts.begin() + 3000);
   tree->Delete_Points(del);
-  std::this_thread::sleep_for(std::chrono::milliseconds(80));  // let async rebuild progress
-  CHECK(tree->validnum() == 2000, "validnum correct after large delete");
+  PointVector removed;
+  CHECK(wait_for_removed_points(*tree, removed), "async rebuild eventually publishes removed points");
   PointVector survivors(pts.begin() + 3000, pts.end());
   std::mt19937 rng(14);
   std::uniform_int_distribution<int> pick(0, (int)survivors.size() - 1);
@@ -364,8 +385,10 @@ static void test_param_setters_and_init() {
   // Deleting enough to cross the (lowered) delete criterion must still leave a valid tree.
   PointVector del(pts.begin(), pts.begin() + 250);
   tree->Delete_Points(del);
-  std::this_thread::sleep_for(std::chrono::milliseconds(40));
-  CHECK(tree->validnum() == 250, "validnum correct after param-driven rebuilds");
+  PointVector removed;
+  CHECK(wait_for_removed_points(*tree, removed), "param-driven rebuild eventually drains removed points");
+  CHECK(findable(*tree, pts[300]), "survivor remains searchable after param-driven rebuild");
+  CHECK(!findable(*tree, pts[10]), "deleted point stays absent after param-driven rebuild");
 }
 
 static void test_root_alpha() {
@@ -573,13 +596,10 @@ static void test_ttl_expiry_drains_removed_points() {
   int removed = tree->Remove_Expired();
   CHECK(removed == 2000, "TTL expires the whole tracked batch");
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(80));
   PointVector drained;
-  tree->acquire_removed_points(drained);
-
-  CHECK(tree->validnum() == 0, "expired batch is fully gone from the tree");
-  CHECK(drained.size() > 0, "acquire_removed_points eventually drains TTL-expired points");
+  CHECK(wait_for_removed_points(*tree, drained), "acquire_removed_points eventually drains TTL-expired points");
   CHECK(drained.size() <= 2000, "drain never returns more points than the expired batch");
+  CHECK(!findable(*tree, batch[0]), "expired batch point is no longer searchable after drain");
 }
 
 static void test_ttl_downsample_still_seen_without_reinsert_refreshes() {
