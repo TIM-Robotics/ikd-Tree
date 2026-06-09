@@ -543,15 +543,7 @@ int KD_TREE<PointType>::Remove_Expired() {
     ttl_groups_.pop_front();
   }
   if (to_delete.empty()) return 0;
-  // Count points ACTUALLY removed via the validnum delta (without changing Delete_Points'
-  // signature). validnum is invariant under the background rebuild, so the delta reflects
-  // only this call's deletions; points already gone (manual delete / downsample drop) don't
-  // change validnum, so they aren't over-counted. Reuse the proven single-writer delete path.
-  int before = validnum();
-  Delete_Points(to_delete);
-  int after = validnum();
-  if (before < 0 || after < 0) return int(to_delete.size());  // validnum unavailable mid-rebuild
-  return before - after;
+  return Delete_Points(to_delete);
 }
 
 template <typename PointType>
@@ -577,16 +569,17 @@ void KD_TREE<PointType>::Add_Point_Boxes(vector<BoxPointType> &BoxPoints) {
 }
 
 template <typename PointType>
-void KD_TREE<PointType>::Delete_Points(PointVector &PointToDel) {
+int KD_TREE<PointType>::Delete_Points(PointVector &PointToDel) {
+  int removed = 0;
   for (int i = 0; i < PointToDel.size(); i++) {
     if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node) {
-      Delete_by_point(&Root_Node, PointToDel[i], true);
+      removed += Delete_by_point(&Root_Node, PointToDel[i], true) ? 1 : 0;
     } else {
       Operation_Logger_Type operation;
       operation.point = PointToDel[i];
       operation.op = DELETE_POINT;
       pthread_mutex_lock(&working_flag_mutex);
-      Delete_by_point(&Root_Node, PointToDel[i], false);
+      removed += Delete_by_point(&Root_Node, PointToDel[i], false) ? 1 : 0;
       if (rebuild_flag) {
         pthread_mutex_lock(&rebuild_logger_mutex_lock);
         Rebuild_Logger.push(operation);
@@ -595,7 +588,7 @@ void KD_TREE<PointType>::Delete_Points(PointVector &PointToDel) {
       pthread_mutex_unlock(&working_flag_mutex);
     }
   }
-  return;
+  return removed;
 }
 
 template <typename PointType>
@@ -785,16 +778,18 @@ int KD_TREE<PointType>::Delete_by_range(KD_TREE_NODE **root, BoxPointType boxpoi
 }
 
 template <typename PointType>
-void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild) {
-  if ((*root) == nullptr || (*root)->tree_deleted) return;
+bool KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild) {
+  if ((*root) == nullptr || (*root)->tree_deleted) return false;
   (*root)->working_flag = true;
   Push_Down(*root);
   if (same_point((*root)->point, point) && !(*root)->point_deleted) {
     (*root)->point_deleted = true;
     (*root)->invalid_point_num += 1;
     if ((*root)->invalid_point_num == (*root)->TreeSize) (*root)->tree_deleted = true;
-    return;
+    (*root)->working_flag = false;
+    return true;
   }
+  bool removed = false;
   Operation_Logger_Type delete_log;
   struct timespec Timeout;
   delete_log.op = DELETE_POINT;
@@ -803,10 +798,10 @@ void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, b
       ((*root)->division_axis == 1 && point.y < (*root)->point.y) ||
       ((*root)->division_axis == 2 && point.z < (*root)->point.z)) {
     if ((Rebuild_Ptr == nullptr) || (*root)->left_son_ptr != *Rebuild_Ptr) {
-      Delete_by_point(&(*root)->left_son_ptr, point, allow_rebuild);
+      removed = Delete_by_point(&(*root)->left_son_ptr, point, allow_rebuild);
     } else {
       pthread_mutex_lock(&working_flag_mutex);
-      Delete_by_point(&(*root)->left_son_ptr, point, false);
+      removed = Delete_by_point(&(*root)->left_son_ptr, point, false);
       if (rebuild_flag) {
         pthread_mutex_lock(&rebuild_logger_mutex_lock);
         Rebuild_Logger.push(delete_log);
@@ -816,10 +811,10 @@ void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, b
     }
   } else {
     if ((Rebuild_Ptr == nullptr) || (*root)->right_son_ptr != *Rebuild_Ptr) {
-      Delete_by_point(&(*root)->right_son_ptr, point, allow_rebuild);
+      removed = Delete_by_point(&(*root)->right_son_ptr, point, allow_rebuild);
     } else {
       pthread_mutex_lock(&working_flag_mutex);
-      Delete_by_point(&(*root)->right_son_ptr, point, false);
+      removed = Delete_by_point(&(*root)->right_son_ptr, point, false);
       if (rebuild_flag) {
         pthread_mutex_lock(&rebuild_logger_mutex_lock);
         Rebuild_Logger.push(delete_log);
@@ -834,7 +829,7 @@ void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, b
   bool need_rebuild = allow_rebuild & Criterion_Check((*root));
   if (need_rebuild) Rebuild(root);
   if ((*root) != nullptr) (*root)->working_flag = false;
-  return;
+  return removed;
 }
 
 template <typename PointType>

@@ -223,7 +223,7 @@ class KD_TREE {
   void BuildTree(KD_TREE_NODE **root, int l, int r, PointVector &Storage);
   void Rebuild(KD_TREE_NODE **root);
   int Delete_by_range(KD_TREE_NODE **root, BoxPointType boxpoint, bool allow_rebuild, bool is_downsample);
-  void Delete_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild);
+  bool Delete_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild);
   void Add_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild, int father_axis);
   void Add_by_range(KD_TREE_NODE **root, BoxPointType boxpoint, bool allow_rebuild);
   void Search(KD_TREE_NODE *root, int k_nearest, PointType point, MANUAL_HEAP &q,
@@ -259,7 +259,7 @@ class KD_TREE {
   void Radius_Search(PointType point, const float radius, PointVector &Storage);
   virtual int Add_Points(PointVector &PointToAdd, bool downsample_on);
   void Add_Point_Boxes(vector<BoxPointType> &BoxPoints);
-  void Delete_Points(PointVector &PointToDel);
+  int Delete_Points(PointVector &PointToDel);
   virtual int Delete_Point_Boxes(vector<BoxPointType> &BoxPoints);
   void flatten(KD_TREE_NODE *root, PointVector &Storage, delete_point_storage_set storage_type);
   virtual void acquire_removed_points(PointVector &removed_points);

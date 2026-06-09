@@ -484,6 +484,24 @@ static void test_ttl_no_conflict_with_manual_delete() {
   CHECK(tree->validnum() == SENTINEL, "double-deleting already-gone points leaves a consistent tree");
 }
 
+static void test_ttl_actual_delete_count_during_rebuild() {
+  SECTION("TTL: actual delete count stays correct even when rebuild may be active");
+  TreePtr tree = new_tree(0.2f, 0.6f, 0.2f);  // low delete criterion encourages rebuild work
+  tree->Set_lifetime(0.03);
+  PointVector batch = rand_points(2000, 81, 100.0f, 400.0f);
+  tree->Build(batch);
+
+  PointVector manual(batch.begin(), batch.begin() + 1500);
+  tree->Delete_Points(manual);  // large lazy-delete set, overlapping with the future TTL expiry batch
+  CHECK(tree->validnum() == 500, "manual delete leaves only the non-overlapping live tail");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(90));
+  int removed = tree->Remove_Expired();
+
+  CHECK(removed == 500, "Remove_Expired reports only the ACTUALLY removed tail during rebuild-capable churn");
+  CHECK(tree->validnum() == 0, "TTL finishes removing the remaining live points");
+}
+
 static void test_ttl_build_clears_stale_index() {
   SECTION("TTL: Build clears stale TTL groups so rebuilt points are not expired");
   TreePtr tree = primed_tree();
@@ -709,6 +727,7 @@ int main() {
   test_ttl_mixed_ages();
   test_ttl_throttle();
   test_ttl_no_conflict_with_manual_delete();
+  test_ttl_actual_delete_count_during_rebuild();
   test_ttl_build_clears_stale_index();
   test_ttl_build_first_scan_expires();
   test_ttl_expiry_drains_removed_points();
