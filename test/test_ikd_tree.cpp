@@ -527,6 +527,22 @@ static void test_ttl_downsample_records_live_representative() {
   CHECK(!findable(*tree, representative), "representative is gone after expiry");
 }
 
+static void test_build_empty_releases_static_root_owner_cleanly() {
+  SECTION("Build(empty) clears the static-root owner so destruction does not revisit freed children");
+  {
+    TreePtr tree = new_tree();
+    PointVector pts = rand_points(64, 78, 0.0f, 50.0f);
+    tree->Build(pts);
+    CHECK(tree->validnum() == 64, "non-empty Build populates the tree before clearing");
+
+    PointVector empty;
+    tree->Build(empty);
+    CHECK(tree->size() == 0, "Build(empty) leaves the tree empty");
+    CHECK(tree->validnum() == 0, "Build(empty) clears all live points");
+  }  // destructor runs here; the regression was a dangling STATIC_ROOT_NODE child traversal.
+  CHECK(true, "destroying after Build(empty) completes without a double free");
+}
+
 // ----------------------------- concurrency stress (sanitizers) -----------------------------
 
 static void test_concurrency_stress_with_ttl() {
@@ -656,6 +672,7 @@ int main() {
   test_ttl_no_conflict_with_manual_delete();
   test_ttl_build_clears_stale_index();
   test_ttl_downsample_records_live_representative();
+  test_build_empty_releases_static_root_owner_cleanly();
 
   // Concurrency / sanitizer stress
   test_concurrency_stress_with_ttl();

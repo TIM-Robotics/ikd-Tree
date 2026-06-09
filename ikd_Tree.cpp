@@ -357,9 +357,13 @@ void KD_TREE<PointType>::Build(PointVector point_cloud) {
   // ScanGroups from the previous tree could expire freshly-built points sharing coordinates
   // (and would linger in memory). lifetime_/throttle are user config and are left intact.
   ttl_groups_.clear();
-  if (Root_Node != nullptr) {
+  if (STATIC_ROOT_NODE != nullptr) {
+    delete_tree_nodes(&STATIC_ROOT_NODE);
+    Root_Node = nullptr;
+  } else if (Root_Node != nullptr) {
     delete_tree_nodes(&Root_Node);
   }
+  STATIC_ROOT_NODE = nullptr;
   if (point_cloud.size() == 0) return;
   STATIC_ROOT_NODE = new KD_TREE_NODE;
   InitTreeNode(STATIC_ROOT_NODE);
