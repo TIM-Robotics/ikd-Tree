@@ -9,9 +9,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <queue>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #define EPSS 1e-6
@@ -293,14 +297,42 @@ class KD_TREE {
   // rebuild thread for free. Only ever touched from the caller thread (Add_Points /
   // Remove_Expired / setters), mirroring the tree's single-external-writer contract, so no
   // extra mutex is needed.
+  struct TTLKey {
+    long long x;
+    long long y;
+    long long z;
+
+    bool operator==(const TTLKey &other) const { return x == other.x && y == other.y && z == other.z; }
+  };
+
+  struct TTLKeyHash {
+    size_t operator()(const TTLKey &key) const {
+      size_t h1 = std::hash<long long>{}(key.x);
+      size_t h2 = std::hash<long long>{}(key.y);
+      size_t h3 = std::hash<long long>{}(key.z);
+      return h1 ^ (h2 << 1) ^ (h3 << 2);
+    }
+  };
+
+  struct TTLRecord {
+    PointType point;
+    uint64_t generation;
+  };
+
+  using TTLRecordVector = std::vector<TTLRecord>;
+
   struct ScanGroup {
     double stamp;
-    PointVector points;
+    TTLRecordVector records;
     size_t consumed = 0;
   };
   double lifetime_ = std::numeric_limits<double>::infinity();  // +inf => TTL disabled
   int ttl_max_delete_per_call_ = 0;                            // 0 => unlimited
   std::deque<ScanGroup> ttl_groups_;
+  std::unordered_map<TTLKey, uint64_t, TTLKeyHash> ttl_latest_generation_;
+  uint64_t ttl_next_generation_ = 1;
+  TTLKey ttl_point_key(const PointType &point) const;
+  uint64_t ttl_mark_seen(const PointType &point);
   static double steady_now();
 };
 

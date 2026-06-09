@@ -539,6 +539,27 @@ static void test_ttl_build_first_scan_expires() {
   for (int i = 0; i < 5; ++i) CHECK(!findable(*tree, batch[i]), "expired Build point is no longer searchable");
 }
 
+static void test_ttl_downsample_reinsertion_refreshes_generation() {
+  SECTION("TTL: downsample reinsertion refreshes generation so stale records do not delete the live representative");
+  TreePtr tree = primed_tree(0.3f, 0.6f, 1.0f);
+  tree->Set_lifetime(0.2);
+
+  PointVector first_scan{P(10.50f, 10.50f, 10.50f), P(10.10f, 10.10f, 10.10f), P(10.90f, 10.90f, 10.90f)};
+  tree->Add_Points(first_scan, true);
+  const PointType representative = first_scan[0];
+  CHECK(tree->validnum() == SENTINEL + 1, "first scan leaves one live representative");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(260));
+  PointVector second_scan{representative, P(10.20f, 10.80f, 10.20f)};
+  tree->Add_Points(second_scan, true);  // same representative observed again through delete/add
+  CHECK(tree->validnum() == SENTINEL + 1, "re-observing the voxel keeps one live representative");
+
+  int removed = tree->Remove_Expired();
+  CHECK(removed == 0, "stale TTL records from the first scan must not delete the refreshed representative");
+  CHECK(tree->validnum() == SENTINEL + 1, "refreshed representative survives stale-record expiry");
+  CHECK(findable(*tree, representative), "representative is still searchable after stale records are skipped");
+}
+
 static void test_ttl_expiry_drains_removed_points() {
   SECTION("TTL: expired points eventually drain through acquire_removed_points");
   TreePtr tree = new_tree(0.2f, 0.6f, 0.2f);  // low delete criterion -> rebuild/flatten records evicted points
@@ -559,6 +580,33 @@ static void test_ttl_expiry_drains_removed_points() {
   CHECK(tree->validnum() == 0, "expired batch is fully gone from the tree");
   CHECK(drained.size() > 0, "acquire_removed_points eventually drains TTL-expired points");
   CHECK(drained.size() <= 2000, "drain never returns more points than the expired batch");
+}
+
+static void test_ttl_downsample_still_seen_without_reinsert_refreshes() {
+  SECTION("TTL: representative that stays best without reinsert still refreshes its last-seen time");
+  TreePtr tree = primed_tree(0.3f, 0.6f, 1.0f);
+  tree->Set_lifetime(0.25);
+
+  PointVector first_scan{P(20.50f, 20.50f, 20.50f), P(20.10f, 20.10f, 20.10f), P(20.90f, 20.90f, 20.90f)};
+  tree->Add_Points(first_scan, true);
+  const PointType representative = first_scan[0];
+  CHECK(tree->validnum() == SENTINEL + 1, "first scan leaves one live representative");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  PointVector still_seen{P(20.15f, 20.15f, 20.15f)};  // existing center representative stays the best voxel point
+  tree->Add_Points(still_seen, true);                 // no delete/add expected, only last-seen refresh
+  CHECK(tree->validnum() == SENTINEL + 1, "still-seen voxel keeps exactly one live representative");
+
+  int first_removed = 0;
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  first_removed = tree->Remove_Expired();
+  CHECK(first_removed == 0, "refresh without reinsertion keeps the representative alive past the original stamp");
+  CHECK(findable(*tree, representative), "representative remains searchable after a last-seen-only refresh");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(180));
+  int second_removed = tree->Remove_Expired();
+  CHECK(second_removed == 1, "representative expires only after the refreshed last-seen lifetime elapses");
+  CHECK(tree->validnum() == SENTINEL, "only the sentinel remains after the refreshed representative finally expires");
 }
 
 static void test_ttl_downsample_records_live_representative() {
@@ -730,7 +778,9 @@ int main() {
   test_ttl_actual_delete_count_during_rebuild();
   test_ttl_build_clears_stale_index();
   test_ttl_build_first_scan_expires();
+  test_ttl_downsample_reinsertion_refreshes_generation();
   test_ttl_expiry_drains_removed_points();
+  test_ttl_downsample_still_seen_without_reinsert_refreshes();
   test_ttl_downsample_records_live_representative();
   test_build_empty_releases_static_root_owner_cleanly();
 

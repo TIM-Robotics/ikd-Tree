@@ -357,6 +357,7 @@ void KD_TREE<PointType>::Build(PointVector point_cloud) {
   // ScanGroups from the previous tree could expire freshly-built points sharing coordinates
   // (and would linger in memory). lifetime_/throttle are user config and are left intact.
   ttl_groups_.clear();
+  ttl_latest_generation_.clear();
   if (STATIC_ROOT_NODE != nullptr) {
     delete_tree_nodes(&STATIC_ROOT_NODE);
     Root_Node = nullptr;
@@ -372,7 +373,12 @@ void KD_TREE<PointType>::Build(PointVector point_cloud) {
   STATIC_ROOT_NODE->TreeSize = 0;
   Root_Node = STATIC_ROOT_NODE->left_son_ptr;
   if (lifetime_ != std::numeric_limits<double>::infinity()) {
-    ttl_groups_.push_back(ScanGroup{steady_now(), std::move(point_cloud)});
+    TTLRecordVector ttl_recorded;
+    ttl_recorded.reserve(point_cloud.size());
+    for (const auto &point : point_cloud) {
+      ttl_recorded.push_back(TTLRecord{point, ttl_mark_seen(point)});
+    }
+    ttl_groups_.push_back(ScanGroup{steady_now(), std::move(ttl_recorded)});
   }
 }
 
@@ -431,9 +437,11 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
   float min_dist, tmp_dist;
   int tmp_counter = 0;
   // For TTL: record the points actually inserted into the tree this batch (the downsample
-  // representative, not the raw input), so expiry tracks what truly lives in the tree.
+  // representative, not the raw input). Even if a representative stays in-place, a fresh
+  // observation must still refresh its TTL generation so "still seen" voxels don't expire.
   const bool record_ttl = (lifetime_ != std::numeric_limits<double>::infinity());
-  PointVector ttl_recorded;
+  TTLRecordVector ttl_recorded;
+  std::unordered_set<TTLKey, TTLKeyHash> ttl_seen_this_batch;
   for (int i = 0; i < PointToAdd.size(); i++) {
     if (downsample_switch) {
       Box_of_Point.vertex_min[0] = floor(PointToAdd[i].x / downsample_size) * downsample_size;
@@ -460,7 +468,6 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
         if (Downsample_Storage.size() > 1 || same_point(PointToAdd[i], downsample_result)) {
           if (Downsample_Storage.size() > 0) Delete_by_range(&Root_Node, Box_of_Point, true, true);
           Add_by_point(&Root_Node, downsample_result, true, Root_Node->division_axis);
-          if (record_ttl) ttl_recorded.push_back(downsample_result);
           tmp_counter++;
         }
       } else {
@@ -473,7 +480,6 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
           pthread_mutex_lock(&working_flag_mutex);
           if (Downsample_Storage.size() > 0) Delete_by_range(&Root_Node, Box_of_Point, false, true);
           Add_by_point(&Root_Node, downsample_result, false, Root_Node->division_axis);
-          if (record_ttl) ttl_recorded.push_back(downsample_result);
           tmp_counter++;
           if (rebuild_flag) {
             pthread_mutex_lock(&rebuild_logger_mutex_lock);
@@ -484,17 +490,23 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
           pthread_mutex_unlock(&working_flag_mutex);
         };
       }
+      if (record_ttl) {
+        const TTLKey key = ttl_point_key(downsample_result);
+        if (ttl_seen_this_batch.insert(key).second) {
+          ttl_recorded.push_back(TTLRecord{downsample_result, ttl_mark_seen(downsample_result)});
+        }
+      }
     } else {
       if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node) {
         Add_by_point(&Root_Node, PointToAdd[i], true, Root_Node->division_axis);
-        if (record_ttl) ttl_recorded.push_back(PointToAdd[i]);
+        if (record_ttl) ttl_recorded.push_back(TTLRecord{PointToAdd[i], ttl_mark_seen(PointToAdd[i])});
       } else {
         Operation_Logger_Type operation;
         operation.point = PointToAdd[i];
         operation.op = ADD_POINT;
         pthread_mutex_lock(&working_flag_mutex);
         Add_by_point(&Root_Node, PointToAdd[i], false, Root_Node->division_axis);
-        if (record_ttl) ttl_recorded.push_back(PointToAdd[i]);
+        if (record_ttl) ttl_recorded.push_back(TTLRecord{PointToAdd[i], ttl_mark_seen(PointToAdd[i])});
         if (rebuild_flag) {
           pthread_mutex_lock(&rebuild_logger_mutex_lock);
           Rebuild_Logger.push(operation);
@@ -513,6 +525,21 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
 }
 
 template <typename PointType>
+typename KD_TREE<PointType>::TTLKey KD_TREE<PointType>::ttl_point_key(const PointType &point) const {
+  return TTLKey{static_cast<long long>(std::llround(point.x / EPSS)),
+                static_cast<long long>(std::llround(point.y / EPSS)),
+                static_cast<long long>(std::llround(point.z / EPSS))};
+}
+
+template <typename PointType>
+uint64_t KD_TREE<PointType>::ttl_mark_seen(const PointType &point) {
+  const TTLKey key = ttl_point_key(point);
+  const uint64_t generation = ttl_next_generation_++;
+  ttl_latest_generation_[key] = generation;
+  return generation;
+}
+
+template <typename PointType>
 double KD_TREE<PointType>::steady_now() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -522,9 +549,10 @@ int KD_TREE<PointType>::Remove_Expired() {
   if (lifetime_ == std::numeric_limits<double>::infinity()) return 0;
   double now = steady_now();
   PointVector to_delete;
+  std::vector<TTLRecord> latest_records_to_expire;
   while (!ttl_groups_.empty() && (now - ttl_groups_.front().stamp) > lifetime_) {
     ScanGroup &g = ttl_groups_.front();
-    const int remaining = int(g.points.size() - g.consumed);
+    const int remaining = int(g.records.size() - g.consumed);
     if (ttl_max_delete_per_call_ > 0) {
       int allowed = ttl_max_delete_per_call_ - int(to_delete.size());
       if (allowed <= 0) break;  // per-call cap reached
@@ -533,17 +561,40 @@ int KD_TREE<PointType>::Remove_Expired() {
         // points and keep the rest in the group for the next call, so the cap is a true
         // hard limit even for a single huge batch. Track a consumed offset to avoid
         // shifting the remaining vector contents on every throttled call.
-        const auto begin = g.points.begin() + g.consumed;
-        to_delete.insert(to_delete.end(), begin, begin + allowed);
+        const auto begin = g.records.begin() + g.consumed;
+        const auto end = begin + allowed;
+        for (auto it = begin; it != end; ++it) {
+          const TTLKey key = ttl_point_key(it->point);
+          auto latest = ttl_latest_generation_.find(key);
+          if (latest != ttl_latest_generation_.end() && latest->second == it->generation) {
+            to_delete.push_back(it->point);
+            latest_records_to_expire.push_back(*it);
+          }
+        }
         g.consumed += allowed;
         break;
       }
     }
-    to_delete.insert(to_delete.end(), g.points.begin() + g.consumed, g.points.end());
+    for (auto it = g.records.begin() + g.consumed; it != g.records.end(); ++it) {
+      const TTLKey key = ttl_point_key(it->point);
+      auto latest = ttl_latest_generation_.find(key);
+      if (latest != ttl_latest_generation_.end() && latest->second == it->generation) {
+        to_delete.push_back(it->point);
+        latest_records_to_expire.push_back(*it);
+      }
+    }
     ttl_groups_.pop_front();
   }
   if (to_delete.empty()) return 0;
-  return Delete_Points(to_delete);
+  const int removed = Delete_Points(to_delete);
+  for (const auto &record : latest_records_to_expire) {
+    const TTLKey key = ttl_point_key(record.point);
+    auto latest = ttl_latest_generation_.find(key);
+    if (latest != ttl_latest_generation_.end() && latest->second == record.generation) {
+      ttl_latest_generation_.erase(latest);
+    }
+  }
+  return removed;
 }
 
 template <typename PointType>
