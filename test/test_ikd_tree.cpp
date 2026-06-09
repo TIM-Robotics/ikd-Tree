@@ -504,6 +504,23 @@ static void test_ttl_build_clears_stale_index() {
   for (int i = 0; i < 5; ++i) CHECK(findable(*tree, rebuilt[i]), "rebuilt point still searchable");
 }
 
+static void test_ttl_build_first_scan_expires() {
+  SECTION("TTL: first scan inserted by Build expires after its lifetime");
+  TreePtr tree = new_tree();
+  tree->Set_lifetime(0.05);
+
+  PointVector batch = rand_points(40, 79, 50.0f, 80.0f);
+  tree->Build(batch);
+  CHECK(tree->validnum() == 40, "Build inserts the first scan points");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  int removed = tree->Remove_Expired();
+
+  CHECK(removed == 40, "Build-inserted first scan is tracked by TTL and fully expires");
+  CHECK(tree->validnum() == 0, "all Build-inserted points are gone after expiry");
+  for (int i = 0; i < 5; ++i) CHECK(!findable(*tree, batch[i]), "expired Build point is no longer searchable");
+}
+
 static void test_ttl_downsample_records_live_representative() {
   SECTION("TTL: downsample expiry tracks the live voxel representative, not raw input count");
   TreePtr tree = primed_tree(0.3f, 0.6f, 1.0f);  // 1m voxel for deterministic clustering
@@ -671,6 +688,7 @@ int main() {
   test_ttl_throttle();
   test_ttl_no_conflict_with_manual_delete();
   test_ttl_build_clears_stale_index();
+  test_ttl_build_first_scan_expires();
   test_ttl_downsample_records_live_representative();
   test_build_empty_releases_static_root_owner_cleanly();
 

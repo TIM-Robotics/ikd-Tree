@@ -371,6 +371,9 @@ void KD_TREE<PointType>::Build(PointVector point_cloud) {
   Update(STATIC_ROOT_NODE);
   STATIC_ROOT_NODE->TreeSize = 0;
   Root_Node = STATIC_ROOT_NODE->left_son_ptr;
+  if (lifetime_ != std::numeric_limits<double>::infinity()) {
+    ttl_groups_.push_back(ScanGroup{steady_now(), std::move(point_cloud)});
+  }
 }
 
 template <typename PointType>
