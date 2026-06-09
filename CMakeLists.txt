@@ -26,16 +26,14 @@ target_include_directories(ikd-Tree PUBLIC
 find_package(Threads REQUIRED)
 target_link_libraries(ikd-Tree PUBLIC Threads::Threads)
 
-# ikd-Tree depends on PCL (point_types.h) + Eigen (aligned_allocator). Both are always
-# required; tests build against the real PCL headers (CI installs libpcl-dev/libeigen3-dev).
+# ikd-Tree depends on PCL (point_types.h) + Eigen (aligned_allocator). Eigen headers
+# typically come transitively via PCL; explicit Eigen3 link is added if the imported target exists.
 find_package(PCL REQUIRED COMPONENTS common)
 target_include_directories(ikd-Tree PUBLIC ${PCL_INCLUDE_DIRS})
 target_link_libraries(ikd-Tree PUBLIC ${PCL_LIBRARIES})
 # Eigen headers normally come transitively with PCL; link the imported target if present.
-find_package(Eigen3 QUIET)
-if(TARGET Eigen3::Eigen)
-  target_link_libraries(ikd-Tree PUBLIC Eigen3::Eigen)
-endif()
+find_package(Eigen3 REQUIRED)
+target_link_libraries(ikd-Tree PUBLIC Eigen3::Eigen)
 
 # ---- sanitizer helper (applied to the library AND the test binary) ----
 function(ikd_apply_sanitizer tgt)
