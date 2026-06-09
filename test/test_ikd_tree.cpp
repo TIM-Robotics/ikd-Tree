@@ -504,6 +504,29 @@ static void test_ttl_build_clears_stale_index() {
   for (int i = 0; i < 5; ++i) CHECK(findable(*tree, rebuilt[i]), "rebuilt point still searchable");
 }
 
+static void test_ttl_downsample_records_live_representative() {
+  SECTION("TTL: downsample expiry tracks the live voxel representative, not raw input count");
+  TreePtr tree = primed_tree(0.3f, 0.6f, 1.0f);  // 1m voxel for deterministic clustering
+  tree->Set_lifetime(0.03);
+
+  PointVector cluster{
+      P(10.50f, 10.50f, 10.50f), P(10.10f, 10.10f, 10.10f), P(10.90f, 10.90f, 10.90f),
+      P(10.20f, 10.80f, 10.20f), P(10.80f, 10.20f, 10.80f),
+  };
+  tree->Add_Points(cluster, true);
+
+  const PointType representative = cluster[0];  // exact voxel center => chosen representative
+  CHECK(tree->validnum() == SENTINEL + 1, "downsample stores exactly one live representative");
+  CHECK(findable(*tree, representative), "chosen representative is searchable before expiry");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(90));
+  int removed = tree->Remove_Expired();
+
+  CHECK(removed == 1, "expiry deletes the single live representative, not the raw cluster size");
+  CHECK(tree->validnum() == SENTINEL, "only the sentinel remains after representative expiry");
+  CHECK(!findable(*tree, representative), "representative is gone after expiry");
+}
+
 // ----------------------------- concurrency stress (sanitizers) -----------------------------
 
 static void test_concurrency_stress_with_ttl() {
@@ -632,6 +655,7 @@ int main() {
   test_ttl_throttle();
   test_ttl_no_conflict_with_manual_delete();
   test_ttl_build_clears_stale_index();
+  test_ttl_downsample_records_live_representative();
 
   // Concurrency / sanitizer stress
   test_concurrency_stress_with_ttl();
