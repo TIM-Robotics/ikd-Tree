@@ -39,6 +39,10 @@ endif()
 
 # ---- sanitizer helper (applied to the library AND the test binary) ----
 function(ikd_apply_sanitizer tgt)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(WARNING "Sanitizers are only supported with GCC or Clang (detected: ${CMAKE_CXX_COMPILER_ID})")
+    return()
+  endif()
   if(IKD_TREE_SANITIZER STREQUAL "asan-ubsan")
     target_compile_options(${tgt} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer -g)
     # Static runtime embeds ASan/UBSan first in the binary, avoiding the
