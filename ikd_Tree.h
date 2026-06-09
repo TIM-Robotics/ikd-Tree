@@ -278,8 +278,10 @@ class KD_TREE {
   // Cap how many points one Remove_Expired() call may delete (0 = unlimited). Throttling
   // avoids rebuild storms and Rebuild_Logger overflow on mass expiration.
   void Set_max_expire_per_call(int n) { ttl_max_delete_per_call_ = n; }
-  // Deletes all points whose age exceeds the lifetime. Returns the number deleted.
-  // Expired points are routed into Points_deleted (use acquire_removed_points to drain).
+  // Deletes expired points through the existing Delete_Points lazy-delete path and returns
+  // how many points this call actually removed. If a per-call cap is configured, repeated
+  // calls may be required to drain all expired points; acquire_removed_points() observes
+  // them only after the normal flatten/rebuild collection path records them.
   int Remove_Expired();
   PointVector PCL_Storage;
   KD_TREE_NODE *Root_Node = nullptr;
