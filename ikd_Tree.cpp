@@ -25,7 +25,16 @@ template <typename PointType>
 KD_TREE<PointType>::~KD_TREE() {
   stop_thread();
   Delete_Storage_Disabled = true;
-  delete_tree_nodes(&Root_Node);
+  // Build() allocates STATIC_ROOT_NODE and hangs the real tree off its left_son_ptr (with
+  // Root_Node == STATIC_ROOT_NODE->left_son_ptr). Free via that owner so the sentinel node
+  // is reclaimed too; otherwise it (and anything still under it) leaks. When Build() was
+  // never called STATIC_ROOT_NODE stays null and Root_Node owns the tree directly.
+  if (STATIC_ROOT_NODE != nullptr) {
+    delete_tree_nodes(&STATIC_ROOT_NODE);
+    Root_Node = nullptr;
+  } else {
+    delete_tree_nodes(&Root_Node);
+  }
   PointVector().swap(PCL_Storage);
   Rebuild_Logger.clear();
 }
@@ -344,9 +353,18 @@ void KD_TREE<PointType>::run_operation(KD_TREE_NODE **root, Operation_Logger_Typ
 
 template <typename PointType>
 void KD_TREE<PointType>::Build(PointVector point_cloud) {
-  if (Root_Node != nullptr) {
+  // Build replaces the whole tree, so purge the TTL time index too -- otherwise stale
+  // ScanGroups from the previous tree could expire freshly-built points sharing coordinates
+  // (and would linger in memory). lifetime_/throttle are user config and are left intact.
+  ttl_groups_.clear();
+  ttl_latest_generation_.clear();
+  if (STATIC_ROOT_NODE != nullptr) {
+    delete_tree_nodes(&STATIC_ROOT_NODE);
+    Root_Node = nullptr;
+  } else if (Root_Node != nullptr) {
     delete_tree_nodes(&Root_Node);
   }
+  STATIC_ROOT_NODE = nullptr;
   if (point_cloud.size() == 0) return;
   STATIC_ROOT_NODE = new KD_TREE_NODE;
   InitTreeNode(STATIC_ROOT_NODE);
@@ -354,6 +372,14 @@ void KD_TREE<PointType>::Build(PointVector point_cloud) {
   Update(STATIC_ROOT_NODE);
   STATIC_ROOT_NODE->TreeSize = 0;
   Root_Node = STATIC_ROOT_NODE->left_son_ptr;
+  if (lifetime_ != std::numeric_limits<double>::infinity()) {
+    TTLRecordVector ttl_recorded;
+    ttl_recorded.reserve(point_cloud.size());
+    for (const auto &point : point_cloud) {
+      ttl_recorded.push_back(TTLRecord{point, ttl_mark_seen(point)});
+    }
+    ttl_groups_.push_back(ScanGroup{steady_now(), std::move(ttl_recorded)});
+  }
 }
 
 template <typename PointType>
@@ -410,6 +436,12 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
   bool downsample_switch = downsample_on && DOWNSAMPLE_SWITCH;
   float min_dist, tmp_dist;
   int tmp_counter = 0;
+  // For TTL: record the points actually inserted into the tree this batch (the downsample
+  // representative, not the raw input). Even if a representative stays in-place, a fresh
+  // observation must still refresh its TTL generation so "still seen" voxels don't expire.
+  const bool record_ttl = (lifetime_ != std::numeric_limits<double>::infinity());
+  TTLRecordVector ttl_recorded;
+  std::unordered_set<TTLKey, TTLKeyHash> ttl_seen_this_batch;
   for (int i = 0; i < PointToAdd.size(); i++) {
     if (downsample_switch) {
       Box_of_Point.vertex_min[0] = floor(PointToAdd[i].x / downsample_size) * downsample_size;
@@ -458,15 +490,23 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
           pthread_mutex_unlock(&working_flag_mutex);
         };
       }
+      if (record_ttl) {
+        const TTLKey key = ttl_point_key(downsample_result);
+        if (ttl_seen_this_batch.insert(key).second) {
+          ttl_recorded.push_back(TTLRecord{downsample_result, ttl_mark_seen(downsample_result)});
+        }
+      }
     } else {
       if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node) {
         Add_by_point(&Root_Node, PointToAdd[i], true, Root_Node->division_axis);
+        if (record_ttl) ttl_recorded.push_back(TTLRecord{PointToAdd[i], ttl_mark_seen(PointToAdd[i])});
       } else {
         Operation_Logger_Type operation;
         operation.point = PointToAdd[i];
         operation.op = ADD_POINT;
         pthread_mutex_lock(&working_flag_mutex);
         Add_by_point(&Root_Node, PointToAdd[i], false, Root_Node->division_axis);
+        if (record_ttl) ttl_recorded.push_back(TTLRecord{PointToAdd[i], ttl_mark_seen(PointToAdd[i])});
         if (rebuild_flag) {
           pthread_mutex_lock(&rebuild_logger_mutex_lock);
           Rebuild_Logger.push(operation);
@@ -476,7 +516,85 @@ int KD_TREE<PointType>::Add_Points(PointVector &PointToAdd, bool downsample_on) 
       }
     }
   }
+  // Record this batch's insertion time for TTL expiry. No-op (and zero overhead) unless a
+  // finite lifetime has been set, so existing callers are unaffected.
+  if (record_ttl && !ttl_recorded.empty()) {
+    ttl_groups_.push_back(ScanGroup{steady_now(), std::move(ttl_recorded)});
+  }
   return tmp_counter;
+}
+
+template <typename PointType>
+typename KD_TREE<PointType>::TTLKey KD_TREE<PointType>::ttl_point_key(const PointType &point) const {
+  return TTLKey{static_cast<long long>(std::llround(point.x / EPSS)),
+                static_cast<long long>(std::llround(point.y / EPSS)),
+                static_cast<long long>(std::llround(point.z / EPSS))};
+}
+
+template <typename PointType>
+uint64_t KD_TREE<PointType>::ttl_mark_seen(const PointType &point) {
+  const TTLKey key = ttl_point_key(point);
+  const uint64_t generation = ttl_next_generation_++;
+  ttl_latest_generation_[key] = generation;
+  return generation;
+}
+
+template <typename PointType>
+double KD_TREE<PointType>::steady_now() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+template <typename PointType>
+int KD_TREE<PointType>::Remove_Expired() {
+  if (lifetime_ == std::numeric_limits<double>::infinity()) return 0;
+  double now = steady_now();
+  PointVector to_delete;
+  TTLRecordVector latest_records_to_expire;
+  while (!ttl_groups_.empty() && (now - ttl_groups_.front().stamp) > lifetime_) {
+    ScanGroup &g = ttl_groups_.front();
+    const int remaining = int(g.records.size() - g.consumed);
+    if (ttl_max_delete_per_call_ > 0) {
+      int allowed = ttl_max_delete_per_call_ - int(to_delete.size());
+      if (allowed <= 0) break;  // per-call cap reached
+      if (remaining > allowed) {
+        // The oldest group alone exceeds the remaining budget: consume only `allowed`
+        // points and keep the rest in the group for the next call, so the cap is a true
+        // hard limit even for a single huge batch. Track a consumed offset to avoid
+        // shifting the remaining vector contents on every throttled call.
+        const auto begin = g.records.begin() + g.consumed;
+        const auto end = begin + allowed;
+        for (auto it = begin; it != end; ++it) {
+          const TTLKey key = ttl_point_key(it->point);
+          auto latest = ttl_latest_generation_.find(key);
+          if (latest != ttl_latest_generation_.end() && latest->second == it->generation) {
+            to_delete.push_back(it->point);
+            latest_records_to_expire.push_back(*it);
+          }
+        }
+        g.consumed += allowed;
+        break;
+      }
+    }
+    for (auto it = g.records.begin() + g.consumed; it != g.records.end(); ++it) {
+      const TTLKey key = ttl_point_key(it->point);
+      auto latest = ttl_latest_generation_.find(key);
+      if (latest != ttl_latest_generation_.end() && latest->second == it->generation) {
+        to_delete.push_back(it->point);
+        latest_records_to_expire.push_back(*it);
+      }
+    }
+    ttl_groups_.pop_front();
+  }
+  if (to_delete.empty()) return 0;
+  const int removed = Delete_Points(to_delete);
+  for (const auto &record : latest_records_to_expire) {
+    const TTLKey key = ttl_point_key(record.point);
+    auto latest = ttl_latest_generation_.find(key);
+    if (latest != ttl_latest_generation_.end() && latest->second == record.generation) {
+      ttl_latest_generation_.erase(latest);
+    }
+  }
+  return removed;
 }
 
 template <typename PointType>
@@ -502,16 +620,17 @@ void KD_TREE<PointType>::Add_Point_Boxes(vector<BoxPointType> &BoxPoints) {
 }
 
 template <typename PointType>
-void KD_TREE<PointType>::Delete_Points(PointVector &PointToDel) {
+int KD_TREE<PointType>::Delete_Points(PointVector &PointToDel) {
+  int removed = 0;
   for (int i = 0; i < PointToDel.size(); i++) {
     if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node) {
-      Delete_by_point(&Root_Node, PointToDel[i], true);
+      removed += Delete_by_point(&Root_Node, PointToDel[i], true) ? 1 : 0;
     } else {
       Operation_Logger_Type operation;
       operation.point = PointToDel[i];
       operation.op = DELETE_POINT;
       pthread_mutex_lock(&working_flag_mutex);
-      Delete_by_point(&Root_Node, PointToDel[i], false);
+      removed += Delete_by_point(&Root_Node, PointToDel[i], false) ? 1 : 0;
       if (rebuild_flag) {
         pthread_mutex_lock(&rebuild_logger_mutex_lock);
         Rebuild_Logger.push(operation);
@@ -520,7 +639,7 @@ void KD_TREE<PointType>::Delete_Points(PointVector &PointToDel) {
       pthread_mutex_unlock(&working_flag_mutex);
     }
   }
-  return;
+  return removed;
 }
 
 template <typename PointType>
@@ -710,16 +829,18 @@ int KD_TREE<PointType>::Delete_by_range(KD_TREE_NODE **root, BoxPointType boxpoi
 }
 
 template <typename PointType>
-void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild) {
-  if ((*root) == nullptr || (*root)->tree_deleted) return;
+bool KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild) {
+  if ((*root) == nullptr || (*root)->tree_deleted) return false;
   (*root)->working_flag = true;
   Push_Down(*root);
   if (same_point((*root)->point, point) && !(*root)->point_deleted) {
     (*root)->point_deleted = true;
     (*root)->invalid_point_num += 1;
     if ((*root)->invalid_point_num == (*root)->TreeSize) (*root)->tree_deleted = true;
-    return;
+    (*root)->working_flag = false;
+    return true;
   }
+  bool removed = false;
   Operation_Logger_Type delete_log;
   struct timespec Timeout;
   delete_log.op = DELETE_POINT;
@@ -728,10 +849,10 @@ void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, b
       ((*root)->division_axis == 1 && point.y < (*root)->point.y) ||
       ((*root)->division_axis == 2 && point.z < (*root)->point.z)) {
     if ((Rebuild_Ptr == nullptr) || (*root)->left_son_ptr != *Rebuild_Ptr) {
-      Delete_by_point(&(*root)->left_son_ptr, point, allow_rebuild);
+      removed = Delete_by_point(&(*root)->left_son_ptr, point, allow_rebuild);
     } else {
       pthread_mutex_lock(&working_flag_mutex);
-      Delete_by_point(&(*root)->left_son_ptr, point, false);
+      removed = Delete_by_point(&(*root)->left_son_ptr, point, false);
       if (rebuild_flag) {
         pthread_mutex_lock(&rebuild_logger_mutex_lock);
         Rebuild_Logger.push(delete_log);
@@ -741,10 +862,10 @@ void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, b
     }
   } else {
     if ((Rebuild_Ptr == nullptr) || (*root)->right_son_ptr != *Rebuild_Ptr) {
-      Delete_by_point(&(*root)->right_son_ptr, point, allow_rebuild);
+      removed = Delete_by_point(&(*root)->right_son_ptr, point, allow_rebuild);
     } else {
       pthread_mutex_lock(&working_flag_mutex);
-      Delete_by_point(&(*root)->right_son_ptr, point, false);
+      removed = Delete_by_point(&(*root)->right_son_ptr, point, false);
       if (rebuild_flag) {
         pthread_mutex_lock(&rebuild_logger_mutex_lock);
         Rebuild_Logger.push(delete_log);
@@ -759,7 +880,7 @@ void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE **root, PointType point, b
   bool need_rebuild = allow_rebuild & Criterion_Check((*root));
   if (need_rebuild) Rebuild(root);
   if ((*root) != nullptr) (*root)->working_flag = false;
-  return;
+  return removed;
 }
 
 template <typename PointType>

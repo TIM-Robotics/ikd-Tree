@@ -9,7 +9,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <deque>
+#include <limits>
 #include <queue>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 
 #define EPSS 1e-6
 #define Minimal_Unbalanced_Tree_Size 10
@@ -220,7 +227,7 @@ class KD_TREE {
   void BuildTree(KD_TREE_NODE **root, int l, int r, PointVector &Storage);
   void Rebuild(KD_TREE_NODE **root);
   int Delete_by_range(KD_TREE_NODE **root, BoxPointType boxpoint, bool allow_rebuild, bool is_downsample);
-  void Delete_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild);
+  bool Delete_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild);
   void Add_by_point(KD_TREE_NODE **root, PointType point, bool allow_rebuild, int father_axis);
   void Add_by_range(KD_TREE_NODE **root, BoxPointType boxpoint, bool allow_rebuild);
   void Search(KD_TREE_NODE *root, int k_nearest, PointType point, MANUAL_HEAP &q,
@@ -256,14 +263,77 @@ class KD_TREE {
   void Radius_Search(PointType point, const float radius, PointVector &Storage);
   virtual int Add_Points(PointVector &PointToAdd, bool downsample_on);
   void Add_Point_Boxes(vector<BoxPointType> &BoxPoints);
-  void Delete_Points(PointVector &PointToDel);
+  int Delete_Points(PointVector &PointToDel);
   virtual int Delete_Point_Boxes(vector<BoxPointType> &BoxPoints);
   void flatten(KD_TREE_NODE *root, PointVector &Storage, delete_point_storage_set storage_type);
   virtual void acquire_removed_points(PointVector &removed_points);
   BoxPointType tree_range();
+
+  // ---- Point lifetime (TTL) ----
+  // Points are auto-stamped with a steady_clock time when added (only while a finite
+  // lifetime is set). Remove_Expired() deletes points older than the lifetime through the
+  // existing Delete_Points path. Disabled by default (lifetime = +inf) so existing callers
+  // see no behavior change.
+  void Set_lifetime(double lifetime_seconds) {
+    if (lifetime_seconds <= 0.0) return;  // or throw, or clamp to +inf
+    lifetime_ = lifetime_seconds;
+  }
+  double Get_lifetime() const { return lifetime_; }
+  // Cap how many points one Remove_Expired() call may delete (0 = unlimited). Throttling
+  // avoids rebuild storms and Rebuild_Logger overflow on mass expiration.
+  void Set_max_expire_per_call(int n) { ttl_max_delete_per_call_ = n; }
+  // Deletes expired points through the existing Delete_Points lazy-delete path and returns
+  // how many points this call actually removed. If a per-call cap is configured, repeated
+  // calls may be required to drain all expired points; acquire_removed_points() observes
+  // them only after the normal flatten/rebuild collection path records them.
+  int Remove_Expired();
   PointVector PCL_Storage;
   KD_TREE_NODE *Root_Node = nullptr;
   int max_queue_size = 0;
+
+ private:
+  // ---- Point lifetime (TTL) state ----
+  // Time index lives OUTSIDE the core tree (nodes/PointType untouched) so it survives the
+  // rebuild thread for free. Only ever touched from the caller thread (Add_Points /
+  // Remove_Expired / setters), mirroring the tree's single-external-writer contract, so no
+  // extra mutex is needed.
+  struct TTLKey {
+    long long x;
+    long long y;
+    long long z;
+
+    bool operator==(const TTLKey &other) const { return x == other.x && y == other.y && z == other.z; }
+  };
+
+  struct TTLKeyHash {
+    size_t operator()(const TTLKey &key) const {
+      size_t h1 = std::hash<long long>{}(key.x);
+      size_t h2 = std::hash<long long>{}(key.y);
+      size_t h3 = std::hash<long long>{}(key.z);
+      return h1 ^ (h2 << 1) ^ (h3 << 2);
+    }
+  };
+
+  struct TTLRecord {
+    PointType point;
+    uint64_t generation;
+  };
+
+  using TTLRecordVector = std::vector<TTLRecord, Eigen::aligned_allocator<TTLRecord>>;
+
+  struct ScanGroup {
+    double stamp;
+    TTLRecordVector records;
+    size_t consumed = 0;
+  };
+  double lifetime_ = std::numeric_limits<double>::infinity();  // +inf => TTL disabled
+  int ttl_max_delete_per_call_ = 0;                            // 0 => unlimited
+  std::deque<ScanGroup> ttl_groups_;
+  std::unordered_map<TTLKey, uint64_t, TTLKeyHash> ttl_latest_generation_;
+  uint64_t ttl_next_generation_ = 1;
+  TTLKey ttl_point_key(const PointType &point) const;
+  uint64_t ttl_mark_seen(const PointType &point);
+  static double steady_now();
 };
 
 }  // namespace ikdtree
