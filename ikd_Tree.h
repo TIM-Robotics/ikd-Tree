@@ -7,8 +7,14 @@
 #include <time.h>
 #include <unistd.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <deque>
+#include <limits>
+#include <mutex>
+#include <optional>
 #include <queue>
 
 #define EPSS 1e-6
@@ -31,6 +37,16 @@ struct BoxPointType {
 enum operation_set { ADD_POINT, DELETE_POINT, DELETE_BOX, ADD_BOX, DOWNSAMPLE_DELETE, PUSH_DOWN };
 
 enum delete_point_storage_set { NOT_RECORD, DELETE_POINTS_REC, MULTI_THREAD_REC };
+
+struct RebuildDebugInfo {
+  bool async = false;
+  int nodes = 0;
+  int invalid = 0;
+  int logger_peak = 0;
+  double start_time_sec = 0.0;
+  double end_time_sec = 0.0;
+  double consumed_time_sec = 0.0;
+};
 
 template <typename PointType>
 class KD_TREE {
@@ -199,11 +215,15 @@ class KD_TREE {
   PointVector Rebuild_PCL_Storage;
   KD_TREE_NODE **Rebuild_Ptr = nullptr;
   int search_mutex_counter = 0;
+  std::atomic_bool rebuild_debug_enabled_{false};
+  std::mutex rebuild_debug_mutex_;
+  std::optional<RebuildDebugInfo> pending_rebuild_debug_info_;
   static void *multi_thread_ptr(void *arg);
   void multi_thread_rebuild();
   void start_thread();
   void stop_thread();
   void run_operation(KD_TREE_NODE **root, Operation_Logger_Type operation);
+  void RecordRebuildDebugInfo(const RebuildDebugInfo &info);
   // KD Tree Functions and augmented variables
   int Treesize_tmp = 0, Validnum_tmp = 0;
   float alpha_bal_tmp = 0.5, alpha_del_tmp = 0.0;
@@ -248,6 +268,8 @@ class KD_TREE {
   void InitializeKDTree(float delete_param = 0.5, float balance_param = 0.7, float box_length = 0.2);
   int size();
   int validnum();
+  void SetRebuildDebugEnabled(bool enabled);
+  std::optional<RebuildDebugInfo> TakeRebuildDebugInfo();
   void root_alpha(float &alpha_bal, float &alpha_del);
   virtual void Build(PointVector point_cloud);
   void Nearest_Search(PointType point, int k_nearest, PointVector &Nearest_Points, vector<float> &Point_Distance,
