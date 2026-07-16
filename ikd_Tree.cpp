@@ -40,7 +40,9 @@ void KD_TREE<PointType>::InitializeKDTree(float delete_param, float balance_para
 template <typename PointType>
 void KD_TREE<PointType>::SetRebuildDebugEnabled(bool enabled) {
   rebuild_debug_enabled_.store(enabled, std::memory_order_relaxed);
-  if (enabled) return;
+  if (enabled) {
+    return;
+  }
 
   std::lock_guard<std::mutex> lock(rebuild_debug_mutex_);
   pending_rebuild_debug_info_.reset();
@@ -48,10 +50,14 @@ void KD_TREE<PointType>::SetRebuildDebugEnabled(bool enabled) {
 
 template <typename PointType>
 void KD_TREE<PointType>::RecordRebuildDebugInfo(const RebuildDebugInfo &info) {
-  if (!rebuild_debug_enabled_.load(std::memory_order_relaxed)) return;
+  if (!rebuild_debug_enabled_.load(std::memory_order_relaxed)) {
+    return;
+  }
 
   std::lock_guard<std::mutex> lock(rebuild_debug_mutex_);
-  if (!rebuild_debug_enabled_.load(std::memory_order_relaxed)) return;
+  if (!rebuild_debug_enabled_.load(std::memory_order_relaxed)) {
+    return;
+  }
   if (!pending_rebuild_debug_info_ ||
       info.consumed_time_sec > pending_rebuild_debug_info_->consumed_time_sec) {
     pending_rebuild_debug_info_ = info;

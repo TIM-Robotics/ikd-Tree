@@ -73,7 +73,9 @@ static PointVector rand_points(int n, unsigned seed, float lo = 0.0f, float hi =
   std::uniform_real_distribution<float> u(lo, hi);
   PointVector v;
   v.reserve(n);
-  for (int i = 0; i < n; ++i) v.push_back(P(u(rng), u(rng), u(rng)));
+  for (int i = 0; i < n; ++i) {
+    v.push_back(P(u(rng), u(rng), u(rng)));
+  }
   return v;
 }
 
@@ -96,7 +98,9 @@ template <typename Predicate>
 static bool wait_until(Predicate pred, int timeout_ms = 2000, int poll_ms = 5) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (std::chrono::steady_clock::now() < deadline) {
-    if (pred()) return true;
+    if (pred()) {
+      return true;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
   }
   return pred();
@@ -148,7 +152,9 @@ static void test_add_points_downsample() {
   PointVector cluster;                  // many points inside a single 1m voxel near (1000,1000,1000)
   std::mt19937 rng(5);
   std::uniform_real_distribution<float> j(0.0f, 0.9f);
-  for (int i = 0; i < 50; ++i) cluster.push_back(P(1000.0f + j(rng), 1000.0f + j(rng), 1000.0f + j(rng)));
+  for (int i = 0; i < 50; ++i) {
+    cluster.push_back(P(1000.0f + j(rng), 1000.0f + j(rng), 1000.0f + j(rng)));
+  }
   tree->Add_Points(cluster, true);
   CHECK(tree->validnum() == before_valid + 1, "downsample collapses the cluster to one live voxel point");
 }
@@ -166,9 +172,13 @@ static void test_nearest_search() {
     std::vector<float> nd;
     tree->Nearest_Search(query, 1, nn, nd);
     CHECK(nn.size() == 1, "nearest returns one point");
-    if (nn.empty()) continue;
+    if (nn.empty()) {
+      continue;
+    }
     float best = std::numeric_limits<float>::infinity();
-    for (auto &p : pts) best = std::min(best, dist2(query, p));
+    for (auto &p : pts) {
+      best = std::min(best, dist2(query, p));
+    }
     CHECK(std::fabs(best - nd[0]) < 1e-2f, "nearest distance matches brute force");
   }
 }
@@ -184,11 +194,16 @@ static void test_knn_ordering() {
   tree->Nearest_Search(q, 5, nn, nd);
   CHECK(nn.size() == 5, "knn returns k points");
   bool sorted = true;
-  for (size_t i = 1; i < nd.size(); ++i)
-    if (nd[i] < nd[i - 1]) sorted = false;
+  for (size_t i = 1; i < nd.size(); ++i) {
+    if (nd[i] < nd[i - 1]) {
+      sorted = false;
+    }
+  }
   CHECK(sorted, "knn distances are non-decreasing");
   std::vector<float> all;
-  for (auto &p : pts) all.push_back(dist2(q, p));
+  for (auto &p : pts) {
+    all.push_back(dist2(q, p));
+  }
   std::sort(all.begin(), all.end());
   CHECK(!nd.empty() && std::fabs(all[4] - nd[4]) < 1e-2f, "5th-nearest distance matches brute force");
 }
@@ -208,10 +223,15 @@ static void test_box_search() {
   PointVector found;
   tree->Box_Search(box, found);
   int brute = 0;
-  for (auto &p : pts)
-    if (in_box(p, box)) ++brute;
+  for (auto &p : pts) {
+    if (in_box(p, box)) {
+      ++brute;
+    }
+  }
   CHECK((int)found.size() == brute, "box search count matches brute force");
-  for (auto &p : found) CHECK(in_box(p, box), "every box-search result lies in the box");
+  for (auto &p : found) {
+    CHECK(in_box(p, box), "every box-search result lies in the box");
+  }
 }
 
 static void test_radius_search() {
@@ -224,10 +244,15 @@ static void test_radius_search() {
   PointVector found;
   tree->Radius_Search(c, radius, found);
   int brute = 0;
-  for (auto &p : pts)
-    if (dist2(c, p) <= radius * radius) ++brute;
+  for (auto &p : pts) {
+    if (dist2(c, p) <= radius * radius) {
+      ++brute;
+    }
+  }
   CHECK(std::abs((int)found.size() - brute) <= 1, "radius search count matches brute force (boundary tol 1)");
-  for (auto &p : found) CHECK(dist2(c, p) <= radius * radius + 1e-1f, "radius results within radius");
+  for (auto &p : found) {
+    CHECK(dist2(c, p) <= radius * radius + 1e-1f, "radius results within radius");
+  }
 }
 
 static void test_delete_points_and_search() {
@@ -239,7 +264,9 @@ static void test_delete_points_and_search() {
   tree->Delete_Points(del);
   CHECK(tree->validnum() == 90, "validnum drops by deleted count");
   CHECK(tree->size() <= 100, "size never grows from deletion");
-  for (auto &d : del) CHECK(!findable(*tree, d), "deleted point no longer returned by search");
+  for (auto &d : del) {
+    CHECK(!findable(*tree, d), "deleted point no longer returned by search");
+  }
   // Survivors remain findable.
   CHECK(findable(*tree, pts[50]), "non-deleted point still found");
 }
@@ -291,7 +318,9 @@ static void test_delete_box_and_readd() {
   CHECK((int)inbox2.size() <= removed, "re-add never restores more than were deleted");
   CHECK(tree->validnum() == valid_after_del + (int)inbox2.size(),
         "validnum stays consistent with what re-add reactivated");
-  for (auto &p : inbox2) CHECK(in_box(p, box), "reactivated points lie within the box");
+  for (auto &p : inbox2) {
+    CHECK(in_box(p, box), "reactivated points lie within the box");
+  }
 }
 
 static void test_multithread_rebuild_correctness() {
@@ -321,8 +350,12 @@ static void test_multithread_rebuild_correctness() {
   PointVector survivors(pts.begin() + 3000, pts.end());
   std::mt19937 rng(14);
   std::uniform_int_distribution<int> pick(0, (int)survivors.size() - 1);
-  for (int t = 0; t < 40; ++t) CHECK(findable(*tree, survivors[pick(rng)]), "surviving point found after rebuild");
-  for (int t = 0; t < 40; ++t) CHECK(!findable(*tree, del[pick(rng) % 3000]), "deleted point not found after rebuild");
+  for (int t = 0; t < 40; ++t) {
+    CHECK(findable(*tree, survivors[pick(rng)]), "surviving point found after rebuild");
+  }
+  for (int t = 0; t < 40; ++t) {
+    CHECK(!findable(*tree, del[pick(rng) % 3000]), "deleted point not found after rebuild");
+  }
 }
 
 static void test_other_point_types() {
@@ -470,7 +503,9 @@ static void test_ttl_expires_old_points() {
   int removed = tree->Remove_Expired();
   CHECK(removed == 80, "all aged points expire");
   CHECK(tree->validnum() == SENTINEL, "only the (unstamped) sentinel remains");
-  for (int i = 0; i < 20; ++i) CHECK(!findable(*tree, batch[i]), "expired point no longer searchable");
+  for (int i = 0; i < 20; ++i) {
+    CHECK(!findable(*tree, batch[i]), "expired point no longer searchable");
+  }
 }
 
 static void test_ttl_mixed_ages() {
@@ -502,7 +537,9 @@ static void test_ttl_throttle() {
   int first = tree->Remove_Expired();
   CHECK(first > 0 && first <= 25, "throttled call deletes whole groups up to the cap");
   int total = first;
-  for (int i = 0; i < 5; ++i) total += tree->Remove_Expired();
+  for (int i = 0; i < 5; ++i) {
+    total += tree->Remove_Expired();
+  }
   CHECK(total == 60, "repeated calls eventually expire everything");
   CHECK(tree->validnum() == SENTINEL, "all expired after draining");
 }
@@ -557,7 +594,9 @@ static void test_ttl_build_clears_stale_index() {
 
   CHECK(removed == 0, "stale TTL groups from pre-Build points must not expire rebuilt points");
   CHECK(tree->validnum() == 40, "rebuilt points remain after expiry pass");
-  for (int i = 0; i < 5; ++i) CHECK(findable(*tree, rebuilt[i]), "rebuilt point still searchable");
+  for (int i = 0; i < 5; ++i) {
+    CHECK(findable(*tree, rebuilt[i]), "rebuilt point still searchable");
+  }
 }
 
 static void test_ttl_build_first_scan_expires() {
@@ -574,7 +613,9 @@ static void test_ttl_build_first_scan_expires() {
 
   CHECK(removed == 40, "Build-inserted first scan is tracked by TTL and fully expires");
   CHECK(tree->validnum() == 0, "all Build-inserted points are gone after expiry");
-  for (int i = 0; i < 5; ++i) CHECK(!findable(*tree, batch[i]), "expired Build point is no longer searchable");
+  for (int i = 0; i < 5; ++i) {
+    CHECK(!findable(*tree, batch[i]), "expired Build point is no longer searchable");
+  }
 }
 
 static void test_ttl_downsample_reinsertion_refreshes_generation() {
@@ -694,7 +735,9 @@ static void test_concurrency_stress_with_ttl() {
   std::uniform_real_distribution<float> u(0.0f, 200.0f);
   for (int iter = 0; iter < 40; ++iter) {
     PointVector batch;
-    for (int i = 0; i < 400; ++i) batch.push_back(P(u(rng), u(rng), u(rng)));
+    for (int i = 0; i < 400; ++i) {
+      batch.push_back(P(u(rng), u(rng), u(rng)));
+    }
     tree->Add_Points(batch, true);  // downsample on -> exercises box-delete + add paths
 
     PointVector nn;
@@ -710,7 +753,9 @@ static void test_concurrency_stress_with_ttl() {
     b.vertex_max[2] = 50;
     tree->Box_Search(b, boxres);
 
-    if (iter % 3 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if (iter % 3 == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     tree->Remove_Expired();
   }
   tree->Remove_Expired();
@@ -736,7 +781,9 @@ static void test_stress_add_delete_time() {
   std::vector<PointVector> recent;  // keep a few recent batches to delete manually
   for (int iter = 0; iter < 80; ++iter) {
     PointVector batch;
-    for (int i = 0; i < 500; ++i) batch.push_back(P(u(rng), u(rng), u(rng)));
+    for (int i = 0; i < 500; ++i) {
+      batch.push_back(P(u(rng), u(rng), u(rng)));
+    }
     tree->Add_Points(batch, true);  // downsample -> realistic churn
     total_added += batch.size();
     recent.push_back(batch);
@@ -750,7 +797,9 @@ static void test_stress_add_delete_time() {
     int sz = tree->size(), vn = tree->validnum();
     CHECK(sz >= 0 && vn >= 0 && vn <= sz, "size/validnum invariant during churn");
 
-    if (iter % 4 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    if (iter % 4 == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    }
     total_expired += tree->Remove_Expired();
   }
   // Drain remaining lifetime.
@@ -765,7 +814,9 @@ static void test_stress_add_delete_time() {
   CHECK(tree->validnum() >= 0, "tree remains internally consistent after stress");
   // The tree must still answer queries correctly for a freshly added point.
   PointVector fresh;
-  for (int i = 0; i < 10; ++i) fresh.push_back(P(1000.0f + i, 1000.0f, 1000.0f));
+  for (int i = 0; i < 10; ++i) {
+    fresh.push_back(P(1000.0f + i, 1000.0f, 1000.0f));
+  }
   tree->Add_Points(fresh, false);
   CHECK(findable(*tree, fresh[0]), "tree queryable after sustained stress");
 
@@ -824,6 +875,8 @@ int main() {
   test_stress_add_delete_time();
 
   std::printf("\n==== %d checks, %d failure(s) ====\n", g_checks, g_failures);
-  if (g_failures == 0) std::printf("ALL TESTS PASSED\n");
+  if (g_failures == 0) {
+    std::printf("ALL TESTS PASSED\n");
+  }
   return g_failures == 0 ? 0 : 1;
 }
