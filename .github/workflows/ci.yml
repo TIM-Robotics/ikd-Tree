@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build & test (${{ matrix.sanitizer }})
+    # Run directly on the host runner (Ubuntu 24.04 -> PCL 1.14), NOT in a container, so the
+    # ThreadSanitizer ASLR workaround (sysctl / setarch -R) works without privileged
+    # containers. The source is ROS-independent; only PCL + Eigen are needed.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [none, asan-ubsan, tsan]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies (PCL + Eigen, no ROS)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            libpcl-dev libeigen3-dev \
+            util-linux
+
+      - name: Reduce ASLR entropy for ThreadSanitizer
+        if: matrix.sanitizer == 'tsan'
+        run: |
+          # Newer kernels use 32-bit mmap randomization that TSan can't map around.
+          # On the host runner sudo can write this; setarch -R in CTest is the fallback.
+          sudo sysctl -w vm.mmap_rnd_bits=28 || echo "sysctl not permitted; relying on setarch -R"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DIKD_TREE_BUILD_TESTS=ON \
+            -DIKD_TREE_SANITIZER=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Run tests
+        working-directory: build
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=0
+        # Sanitizer runtimes are statically linked (-static-lib*san in CMake), so no
+        # LD_PRELOAD ordering workaround is needed. TSan ASLR is handled by `setarch -R`
+        # in the CTest command (CMakeLists.txt).
+        run: ctest --output-on-failure --no-tests=error
