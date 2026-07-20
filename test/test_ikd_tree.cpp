@@ -323,6 +323,32 @@ static void test_delete_box_and_readd() {
   }
 }
 
+static void test_sync_rebuild_debug_info() {
+  SECTION("Small delete triggers sync rebuild debug info");
+  TreePtr tree = new_tree(0.2f, 0.6f, 0.2f);
+  tree->SetRebuildDebugEnabled(true);
+  PointVector pts = rand_points(500, 78);
+  tree->Build(pts);
+  CHECK(!tree->TakeRebuildDebugInfo(), "Build alone does not report rebuild debug info");
+
+  PointVector del(pts.begin(), pts.begin() + 300);
+  tree->Delete_Points(del);
+
+  const auto rebuild_info = tree->TakeRebuildDebugInfo();
+  CHECK(rebuild_info.has_value(), "sync rebuild publishes debug info immediately");
+  if (rebuild_info) {
+    CHECK(!rebuild_info->async, "small rebuild is reported as sync");
+    CHECK(rebuild_info->nodes > 0 && rebuild_info->nodes < Multi_Thread_Rebuild_Point_Num,
+          "sync rebuild reports a subtree below the async threshold");
+    CHECK(rebuild_info->invalid > 0, "sync rebuild reports invalid nodes");
+    CHECK(rebuild_info->logger_peak == 0, "sync rebuild has no async operation logger");
+    CHECK(rebuild_info->start_time_sec > 0.0, "sync rebuild reports start time");
+    CHECK(rebuild_info->end_time_sec >= rebuild_info->start_time_sec, "sync rebuild reports ordered wall times");
+    CHECK(rebuild_info->consumed_time_sec > 0.0, "sync rebuild reports elapsed time");
+  }
+  CHECK(!tree->TakeRebuildDebugInfo(), "taking sync rebuild debug info clears the pending slot");
+}
+
 static void test_multithread_rebuild_correctness() {
   SECTION("Large add/delete triggers async rebuild; queries stay correct");
   TreePtr tree = new_tree(0.3f, 0.6f, 0.5f);
@@ -847,6 +873,7 @@ int main() {
   test_delete_points_and_search();
   test_acquire_removed_points();
   test_delete_box_and_readd();
+  test_sync_rebuild_debug_info();
   test_multithread_rebuild_correctness();
   test_other_point_types();
   test_tree_range();
