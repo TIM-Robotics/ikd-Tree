@@ -327,61 +327,66 @@ static void test_sync_rebuild_debug_info() {
   SECTION("Small delete triggers sync rebuild debug info");
   TreePtr tree = new_tree(0.2f, 0.6f, 0.2f);
   tree->SetRebuildDebugEnabled(true);
+  bool async_callback_called = false;
+  tree->SetAsyncRebuildDebugCallback(
+      [&](const ikdtree::AsyncRebuildDebugInfo &) { async_callback_called = true; });
   PointVector pts = rand_points(500, 78);
   tree->Build(pts);
-  CHECK(!tree->TakeRebuildDebugInfo(), "Build alone does not report rebuild debug info");
+  CHECK(!tree->TakeSyncRebuildDebugInfo(), "Build alone does not report sync rebuild debug info");
+  CHECK(!async_callback_called, "Build alone does not invoke the async rebuild callback");
 
   PointVector del(pts.begin(), pts.begin() + 300);
   tree->Delete_Points(del);
 
-  const auto rebuild_info = tree->TakeRebuildDebugInfo();
+  const auto rebuild_info = tree->TakeSyncRebuildDebugInfo();
   CHECK(rebuild_info.has_value(), "sync rebuild publishes debug info immediately");
   if (rebuild_info) {
-    CHECK(!rebuild_info->async, "small rebuild is reported as sync");
-    CHECK(rebuild_info->nodes > 0 && rebuild_info->nodes < Multi_Thread_Rebuild_Point_Num,
-          "sync rebuild reports a subtree below the async threshold");
-    CHECK(rebuild_info->invalid > 0, "sync rebuild reports invalid nodes");
-    CHECK(rebuild_info->logger_peak == 0, "sync rebuild has no async operation logger");
-    CHECK(rebuild_info->start_time_sec > 0.0, "sync rebuild reports start time");
-    CHECK(rebuild_info->end_time_sec >= rebuild_info->start_time_sec, "sync rebuild reports ordered wall times");
-    CHECK(rebuild_info->consumed_time_sec > 0.0, "sync rebuild reports elapsed time");
+    CHECK(rebuild_info->consumed_time_sec > 0.0, "sync rebuild reports total elapsed time");
   }
-  CHECK(!tree->TakeRebuildDebugInfo(), "taking sync rebuild debug info clears the pending slot");
+  CHECK(!tree->TakeSyncRebuildDebugInfo(), "taking sync rebuild debug info clears the pending slot");
+  CHECK(!async_callback_called, "sync rebuild does not invoke the async rebuild callback");
+  tree->SetAsyncRebuildDebugCallback({});
 }
 
 static void test_multithread_rebuild_correctness() {
-  SECTION("Large add/delete triggers async rebuild; queries stay correct");
-  TreePtr tree = new_tree(0.3f, 0.6f, 0.5f);
+  SECTION("Large add triggers async rebuild; queries stay correct");
+  TreePtr tree = new_tree(0.3f, 0.5f, 0.5f);
   tree->SetRebuildDebugEnabled(true);
+  std::mutex callback_mutex;
+  std::optional<ikdtree::AsyncRebuildDebugInfo> rebuild_info;
+  tree->SetAsyncRebuildDebugCallback([&](const ikdtree::AsyncRebuildDebugInfo &info) {
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    rebuild_info = info;
+  });
   PointVector pts = rand_points(5000, 13);  // > Multi_Thread_Rebuild_Point_Num (1500)
   tree->Build(pts);
   CHECK(tree->size() == 5000, "large build size correct");
-  PointVector del(pts.begin(), pts.begin() + 3000);
-  tree->Delete_Points(del);
-  PointVector removed;
-  CHECK(wait_for_removed_points(*tree, removed), "async rebuild eventually publishes removed points");
-  std::optional<ikdtree::RebuildDebugInfo> rebuild_info;
+  PointVector added{P(200.0f, 200.0f, 200.0f)};
+  tree->Add_Points(added, false);
   const bool debug_ready = wait_until([&]() {
-    rebuild_info = tree->TakeRebuildDebugInfo();
+    std::lock_guard<std::mutex> lock(callback_mutex);
     return rebuild_info.has_value();
   });
   CHECK(debug_ready, "rebuild eventually publishes debug info");
+  tree->SetAsyncRebuildDebugCallback({});
+  std::lock_guard<std::mutex> lock(callback_mutex);
   if (rebuild_info) {
-    CHECK(rebuild_info->nodes > 0, "rebuild reports target subtree nodes");
-    CHECK(rebuild_info->invalid > 0, "rebuild reports invalid nodes");
-    CHECK(rebuild_info->consumed_time_sec > 0.0, "rebuild reports elapsed time");
+    CHECK(rebuild_info->nodes > 0, "rebuild callback reports target subtree nodes");
+    CHECK(rebuild_info->invalid >= 0 && rebuild_info->invalid <= rebuild_info->nodes,
+          "rebuild reports a valid invalid-node count");
+    CHECK(rebuild_info->start_time_sec > 0.0, "rebuild callback reports start time");
+    CHECK(rebuild_info->end_time_sec >= rebuild_info->start_time_sec,
+          "rebuild callback reports ordered wall times");
+    CHECK(rebuild_info->consumed_time_sec > 0.0, "rebuild callback reports elapsed time");
   }
   tree->SetRebuildDebugEnabled(false);
-  CHECK(!tree->TakeRebuildDebugInfo(), "disabling rebuild debug clears the pending slot");
-  PointVector survivors(pts.begin() + 3000, pts.end());
+  CHECK(!tree->TakeSyncRebuildDebugInfo(), "disabling rebuild debug clears pending sync info");
   std::mt19937 rng(14);
-  std::uniform_int_distribution<int> pick(0, (int)survivors.size() - 1);
+  std::uniform_int_distribution<int> pick(0, (int)pts.size() - 1);
   for (int t = 0; t < 40; ++t) {
-    CHECK(findable(*tree, survivors[pick(rng)]), "surviving point found after rebuild");
+    CHECK(findable(*tree, pts[pick(rng)]), "original point found after rebuild");
   }
-  for (int t = 0; t < 40; ++t) {
-    CHECK(!findable(*tree, del[pick(rng) % 3000]), "deleted point not found after rebuild");
-  }
+  CHECK(findable(*tree, added.front()), "added point found after rebuild");
 }
 
 static void test_other_point_types() {

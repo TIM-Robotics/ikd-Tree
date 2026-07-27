@@ -54,11 +54,18 @@ void KD_TREE<PointType>::SetRebuildDebugEnabled(bool enabled) {
   }
 
   std::lock_guard<std::mutex> lock(rebuild_debug_mutex_);
-  pending_rebuild_debug_info_.reset();
+  pending_sync_rebuild_debug_info_.reset();
 }
 
 template <typename PointType>
-void KD_TREE<PointType>::RecordRebuildDebugInfo(const RebuildDebugInfo &info) {
+void KD_TREE<PointType>::SetAsyncRebuildDebugCallback(
+    std::function<void(const AsyncRebuildDebugInfo &)> callback) {
+  std::lock_guard<std::mutex> lock(async_rebuild_debug_callback_mutex_);
+  async_rebuild_debug_callback_ = std::move(callback);
+}
+
+template <typename PointType>
+void KD_TREE<PointType>::RecordSyncRebuildDebugInfo(const SyncRebuildDebugInfo &info) {
   if (!rebuild_debug_enabled_.load(std::memory_order_relaxed)) {
     return;
   }
@@ -67,17 +74,18 @@ void KD_TREE<PointType>::RecordRebuildDebugInfo(const RebuildDebugInfo &info) {
   if (!rebuild_debug_enabled_.load(std::memory_order_relaxed)) {
     return;
   }
-  if (!pending_rebuild_debug_info_ ||
-      info.consumed_time_sec > pending_rebuild_debug_info_->consumed_time_sec) {
-    pending_rebuild_debug_info_ = info;
+  if (pending_sync_rebuild_debug_info_) {
+    pending_sync_rebuild_debug_info_->consumed_time_sec += info.consumed_time_sec;
+  } else {
+    pending_sync_rebuild_debug_info_ = info;
   }
 }
 
 template <typename PointType>
-std::optional<RebuildDebugInfo> KD_TREE<PointType>::TakeRebuildDebugInfo() {
+std::optional<SyncRebuildDebugInfo> KD_TREE<PointType>::TakeSyncRebuildDebugInfo() {
   std::lock_guard<std::mutex> lock(rebuild_debug_mutex_);
-  auto result = pending_rebuild_debug_info_;
-  pending_rebuild_debug_info_.reset();
+  auto result = pending_sync_rebuild_debug_info_;
+  pending_sync_rebuild_debug_info_.reset();
   return result;
 }
 
@@ -240,14 +248,13 @@ void KD_TREE<PointType>::multi_thread_rebuild() {
   pthread_mutex_unlock(&termination_flag_mutex_lock);
   while (!terminated) {
     bool collect_debug = false;
-    RebuildDebugInfo debug_info;
+    AsyncRebuildDebugInfo debug_info;
     std::chrono::steady_clock::time_point debug_start;
     pthread_mutex_lock(&rebuild_ptr_mutex_lock);
     pthread_mutex_lock(&working_flag_mutex);
     if (Rebuild_Ptr != nullptr) {
       collect_debug = rebuild_debug_enabled_.load(std::memory_order_relaxed);
       if (collect_debug) {
-        debug_info.async = true;
         debug_info.nodes = (*Rebuild_Ptr)->TreeSize;
         debug_info.invalid = (*Rebuild_Ptr)->invalid_point_num;
         const auto wall_start = std::chrono::system_clock::now();
@@ -300,9 +307,6 @@ void KD_TREE<PointType>::multi_thread_rebuild() {
         while (!Rebuild_Logger.empty()) {
           Operation = Rebuild_Logger.front();
           max_queue_size = max(max_queue_size, Rebuild_Logger.size());
-          if (collect_debug) {
-            debug_info.logger_peak = max(debug_info.logger_peak, Rebuild_Logger.size());
-          }
           Rebuild_Logger.pop();
           pthread_mutex_unlock(&rebuild_logger_mutex_lock);
           pthread_mutex_unlock(&working_flag_mutex);
@@ -363,7 +367,10 @@ void KD_TREE<PointType>::multi_thread_rebuild() {
       debug_info.end_time_sec = std::chrono::duration<double>(wall_end.time_since_epoch()).count();
       debug_info.consumed_time_sec =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - debug_start).count();
-      RecordRebuildDebugInfo(debug_info);
+      std::lock_guard<std::mutex> lock(async_rebuild_debug_callback_mutex_);
+      if (async_rebuild_debug_callback_) {
+        async_rebuild_debug_callback_(debug_info);
+      }
     }
     pthread_mutex_lock(&termination_flag_mutex_lock);
     terminated = termination_flag;
@@ -801,13 +808,9 @@ void KD_TREE<PointType>::Rebuild(KD_TREE_NODE **root) {
     }
   } else {
     const bool collect_debug = rebuild_debug_enabled_.load(std::memory_order_relaxed);
-    RebuildDebugInfo debug_info;
+    SyncRebuildDebugInfo debug_info;
     std::chrono::steady_clock::time_point debug_start;
     if (collect_debug) {
-      debug_info.nodes = (*root)->TreeSize;
-      debug_info.invalid = (*root)->invalid_point_num;
-      const auto wall_start = std::chrono::system_clock::now();
-      debug_info.start_time_sec = std::chrono::duration<double>(wall_start.time_since_epoch()).count();
       debug_start = std::chrono::steady_clock::now();
     }
 
@@ -820,11 +823,9 @@ void KD_TREE<PointType>::Rebuild(KD_TREE_NODE **root) {
     if (*root == Root_Node) STATIC_ROOT_NODE->left_son_ptr = *root;
 
     if (collect_debug) {
-      const auto wall_end = std::chrono::system_clock::now();
-      debug_info.end_time_sec = std::chrono::duration<double>(wall_end.time_since_epoch()).count();
       debug_info.consumed_time_sec =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - debug_start).count();
-      RecordRebuildDebugInfo(debug_info);
+      RecordSyncRebuildDebugInfo(debug_info);
     }
   }
   return;
