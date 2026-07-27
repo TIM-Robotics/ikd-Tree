@@ -58,8 +58,7 @@ void KD_TREE<PointType>::SetRebuildDebugEnabled(bool enabled) {
 }
 
 template <typename PointType>
-void KD_TREE<PointType>::SetAsyncRebuildDebugCallback(
-    std::function<void(const AsyncRebuildDebugInfo &)> callback) {
+void KD_TREE<PointType>::SetAsyncRebuildDebugCallback(std::function<void(const AsyncRebuildDebugInfo &)> callback) {
   std::lock_guard<std::mutex> lock(async_rebuild_debug_callback_mutex_);
   async_rebuild_debug_callback_ = std::move(callback);
 }
@@ -255,11 +254,11 @@ void KD_TREE<PointType>::multi_thread_rebuild() {
     if (Rebuild_Ptr != nullptr) {
       collect_debug = rebuild_debug_enabled_.load(std::memory_order_relaxed);
       if (collect_debug) {
+        debug_info.trigger_source = pending_async_rebuild_trigger_source_;
         debug_info.nodes = (*Rebuild_Ptr)->TreeSize;
         debug_info.invalid = (*Rebuild_Ptr)->invalid_point_num;
         const auto wall_start = std::chrono::system_clock::now();
-        debug_info.start_time_sec =
-            std::chrono::duration<double>(wall_start.time_since_epoch()).count();
+        debug_info.start_time_sec = std::chrono::duration<double>(wall_start.time_since_epoch()).count();
         debug_start = std::chrono::steady_clock::now();
       }
       /* Traverse and copy */
@@ -803,6 +802,7 @@ void KD_TREE<PointType>::Rebuild(KD_TREE_NODE **root) {
     if (!pthread_mutex_trylock(&rebuild_ptr_mutex_lock)) {
       if (Rebuild_Ptr == nullptr || ((*root)->TreeSize > (*Rebuild_Ptr)->TreeSize)) {
         Rebuild_Ptr = root;
+        pending_async_rebuild_trigger_source_ = current_rebuild_trigger_source_;
       }
       pthread_mutex_unlock(&rebuild_ptr_mutex_lock);
     }

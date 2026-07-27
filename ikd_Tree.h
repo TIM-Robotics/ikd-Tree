@@ -47,12 +47,20 @@ struct SyncRebuildDebugInfo {
   double consumed_time_sec = 0.0;
 };
 
+enum class RebuildTriggerSource {
+  kUnknown,
+  kLaserMapFovSegment,
+  kMapIncremental,
+  kRemoveExpired,
+};
+
 struct AsyncRebuildDebugInfo {
   int nodes = 0;
   int invalid = 0;
   double start_time_sec = 0.0;
   double end_time_sec = 0.0;
   double consumed_time_sec = 0.0;
+  RebuildTriggerSource trigger_source = RebuildTriggerSource::kUnknown;
 };
 
 template <typename PointType>
@@ -280,6 +288,7 @@ class KD_TREE {
   void SetRebuildDebugEnabled(bool enabled);
   void SetAsyncRebuildDebugCallback(std::function<void(const AsyncRebuildDebugInfo &)> callback);
   std::optional<SyncRebuildDebugInfo> TakeSyncRebuildDebugInfo();
+  void SetRebuildTriggerSource(RebuildTriggerSource source) { current_rebuild_trigger_source_ = source; }
   void root_alpha(float &alpha_bal, float &alpha_del);
   virtual void Build(PointVector point_cloud);
   void Nearest_Search(PointType point, int k_nearest, PointVector &Nearest_Points, vector<float> &Point_Distance,
@@ -359,6 +368,9 @@ class KD_TREE {
   TTLKey ttl_point_key(const PointType &point) const;
   uint64_t ttl_mark_seen(const PointType &point);
   static double steady_now();
+
+  RebuildTriggerSource current_rebuild_trigger_source_ = RebuildTriggerSource::kUnknown;
+  RebuildTriggerSource pending_async_rebuild_trigger_source_ = RebuildTriggerSource::kUnknown;
 };
 
 }  // namespace ikdtree
